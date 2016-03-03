@@ -1,0 +1,4 @@
+[submodule "switch"]
+	path = switch
+	url = https://github.com/p4lang/switch.git
+	branch = ops
