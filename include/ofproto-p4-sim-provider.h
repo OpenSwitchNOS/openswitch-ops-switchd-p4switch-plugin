@@ -43,6 +43,7 @@ struct sim_provider_group {
 struct ofp4vlan {
     struct hmap_node hmap_node;
     uint32_t vid;
+    int32_t ref_count;
     switch_handle_t vlan_handle;    /* P4 vlan handle */
 };
 
@@ -77,6 +78,8 @@ struct ofbundle {
 
     char *ip4_address;
     char *ip6_address;
+
+    bool filter_created;
 };
 
 struct sim_provider_ofport {
@@ -134,7 +137,6 @@ struct sim_provider_node {
     /* Bridging. */
     struct netflow *netflow;
     struct hmap bundles;        /* Contains "struct ofbundle"s. */
-    struct hmap vlans;          /* Contains "struct ofp4vlan"s. */
     struct mac_learning *ml;
     struct mcast_snooping *ms;
     bool has_bonded_bundles;
@@ -162,15 +164,11 @@ struct sim_provider_node {
     struct sset ghost_ports;    /* Ports with no datapath port. */
     uint64_t change_seq;        /* Connectivity status changes. */
 
-    /* Work queues. */
     unsigned long *vlan_intf_bmp;       /* 4096 bitmap of vlan interfaces */
 
     bool vrf;                   /* Specifies whether specific ofproto instance
                                  * is backing up VRF and not bridge */
     switch_handle_t vrf_handle; /* vrf id handle */
-
-    switch_mac_addr_t mac;      /* system router mac address */
-    switch_handle_t rmac_handle; /* router mac handle */
 };
 
 struct sim_provider_port_dump_state {
