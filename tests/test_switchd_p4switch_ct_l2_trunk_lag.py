@@ -174,6 +174,7 @@ class Test_dual_switch_test:
     info("##### Create Topology #####\n")
     Test_dual_switch_test.test = twoSwitchTest()
     #pdb.set_trace()
+    time.sleep(10)
 
   def test_vlan_add(self):
     info("##### Configure Vlan #####\n")
@@ -194,6 +195,7 @@ class Test_dual_switch_test:
     info("##### Configure S2 Switch Interfaces - Trunk Mode #####\n")
     self.test.config_interface(sw="s2",intf=3,mode="trunk",vlan=500,
                                allowed_vlan=500)
+    time.sleep(10)
 
   def test_show_run_1(self):
     self.test.show_running_config()
@@ -227,6 +229,7 @@ class Test_dual_switch_test:
                                    allowed_vlan=500)
 
   def test_show_run_2(self):
+    time.sleep(10)
     self.test.show_running_config()
 
   def test_mininet_ping_hosts_lag(self):
