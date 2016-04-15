@@ -49,6 +49,9 @@ static struct ovs_mutex sim_list_mutex = OVS_MUTEX_INITIALIZER;
 static struct ovs_list sim_list OVS_GUARDED_BY(sim_list_mutex)
     = OVS_LIST_INITIALIZER(&sim_list);
 
+switch_handle_t bn_hostif_handle = SWITCH_API_INVALID_HANDLE;
+switch_handle_t bn_rmac_handle = SWITCH_API_INVALID_HANDLE;
+
 struct netdev_sim {
     struct netdev up;
 
@@ -76,6 +79,7 @@ struct netdev_sim {
     uint32_t port_num;
     switch_handle_t hostif_handle;
     switch_handle_t port_handle;
+    switch_handle_t rmac_handle;
 };
 
 static int netdev_sim_construct(struct netdev *);
@@ -110,7 +114,7 @@ netdev_sim_construct(struct netdev *netdev_)
 
     n = atomic_count_inc(&next_n);
 
-    VLOG_INFO("sim construct for port %s", netdev->up.name);
+    VLOG_DBG("sim construct for port %s", netdev->up.name);
 
     ovs_mutex_init(&netdev->mutex);
     ovs_mutex_lock(&netdev->mutex);
@@ -125,6 +129,7 @@ netdev_sim_construct(struct netdev *netdev_)
     netdev->link_state = 0;
     netdev->hostif_handle = SWITCH_API_INVALID_HANDLE;
     netdev->port_handle = SWITCH_API_INVALID_HANDLE;
+    netdev->rmac_handle = SWITCH_API_INVALID_HANDLE;
     ovs_mutex_unlock(&netdev->mutex);
 
     ovs_mutex_lock(&sim_list_mutex);
@@ -159,19 +164,139 @@ netdev_sim_run(void)
 }
 
 static int
+netdev_sim_rmac_handle_allocate(struct netdev *netdev_)
+{
+    struct netdev_sim *netdev = netdev_sim_cast(netdev_);
+    switch_mac_addr_t mac;
+    switch_status_t status = SWITCH_STATUS_SUCCESS;
+
+    if (netdev->rmac_handle == SWITCH_API_INVALID_HANDLE) {
+        netdev->rmac_handle = switch_api_router_mac_group_create(0x0);
+        ovs_assert(netdev->rmac_handle != SWITCH_API_INVALID_HANDLE);
+        memcpy(&mac.mac_addr, netdev->hwaddr, ETH_ADDR_LEN);
+        status = switch_api_router_mac_add(
+                     0x0,
+                     netdev->rmac_handle,
+                     &mac);
+        VLOG_INFO("mac %2x:%2x:%2x:%2x:%2x:%2x",
+                   netdev->hwaddr[0],
+                   netdev->hwaddr[1],
+                   netdev->hwaddr[2],
+                   netdev->hwaddr[3],
+                   netdev->hwaddr[4],
+                   netdev->hwaddr[5]);
+        ovs_assert(status == SWITCH_STATUS_SUCCESS);
+
+        if (status != SWITCH_STATUS_SUCCESS) {
+            VLOG_ERR("rmac handle allocate failed");
+            return EINVAL;
+        }
+    }
+    return 0;
+}
+
+int
+netdev_sim_rmac_handle_deallocate(struct netdev *netdev_)
+{
+    struct netdev_sim *netdev = netdev_sim_cast(netdev_);
+    switch_mac_addr_t mac;
+    switch_status_t status = SWITCH_STATUS_SUCCESS;
+
+    if (netdev->rmac_handle != SWITCH_API_INVALID_HANDLE) {
+        ovs_assert(netdev->rmac_handle != SWITCH_API_INVALID_HANDLE);
+        memcpy(&mac.mac_addr, netdev->hwaddr, ETH_ADDR_LEN);
+        status = switch_api_router_mac_delete(
+                     0x0,
+                     netdev->rmac_handle,
+                     &mac);
+        ovs_assert(status == SWITCH_STATUS_SUCCESS);
+
+        if (status != SWITCH_STATUS_SUCCESS) {
+            VLOG_ERR("rmac handle allocate failed");
+            return EINVAL;
+        }
+        status = switch_api_router_mac_group_delete(0x0, netdev->rmac_handle);
+    }
+    return 0;
+}
+
+static int
 netdev_sim_internal_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
 {
     struct netdev_sim *netdev = netdev_sim_cast(netdev_);
-    const char *mac_addr = smap_get(args, INTERFACE_HW_INTF_INFO_MAP_MAC_ADDR);
+    bool bridge = smap_get(args, INTERFACE_HW_INTF_INFO_MAP_BRIDGE);
+    char cmd[MAX_CMD_BUF];
 
     ovs_mutex_lock(&netdev->mutex);
     strncpy(netdev->linux_intf_name, netdev->up.name, sizeof(netdev->linux_intf_name));
-    VLOG_INFO("TBD - internal_set_hw_intf_info for %s", netdev->linux_intf_name);
-    if(mac_addr != NULL) {
-        strncpy(netdev->hw_addr_str, mac_addr, sizeof(netdev->hw_addr_str));
+    VLOG_INFO("internal_set_hw_intf_info for %s", netdev->linux_intf_name);
+
+    if (bridge) {
+        sprintf(cmd, "%s /sbin/ip tuntap add dev %s mode tap",
+                SWNS_EXEC, netdev->linux_intf_name);
+
+        if (system(cmd) != 0) {
+            VLOG_ERR("NETDEV-SIM | system command failure cmd=%s", cmd);
+        }
+
+        if (netdev->hostif_handle == SWITCH_API_INVALID_HANDLE) {
+            switch_hostif_t     hostif;
+            switch_status_t     status = SWITCH_STATUS_SUCCESS;
+
+            memset(&hostif, 0, sizeof(hostif));
+            strncpy(hostif.intf_name, netdev->linux_intf_name, sizeof(hostif.intf_name));
+            netdev->hostif_handle = switch_api_hostif_create(0, &hostif);
+            bn_hostif_handle = netdev->hostif_handle;
+            VLOG_INFO("switch_api_hostif_create handle 0x%x", netdev->hostif_handle);
+        }
+
+        if (netdev->rmac_handle == SWITCH_API_INVALID_HANDLE) {
+
+            sprintf(cmd, "%s /sbin/ip link set dev %s down",
+                    SWNS_EXEC, netdev->linux_intf_name);
+            if (system(cmd) != 0) {
+                VLOG_ERR("NETDEV-SIM | system command failure cmd=%s", cmd);
+            }
+
+            sprintf(cmd, "%s /sbin/ip link set %s address %x:%x:%x:%x:%x:%x",
+                    SWNS_EXEC, netdev->up.name,
+                    netdev->hwaddr[0], netdev->hwaddr[1],
+                    netdev->hwaddr[2], netdev->hwaddr[3],
+                    netdev->hwaddr[4], netdev->hwaddr[5]);
+            if (system(cmd) != 0) {
+                VLOG_ERR("NETDEV-SIM | system command failure cmd=%s", cmd);
+            }
+
+            sprintf(cmd, "%s /sbin/ip link set dev %s up",
+                    SWNS_EXEC, netdev->linux_intf_name);
+            if (system(cmd) != 0) {
+                VLOG_ERR("NETDEV-SIM | system command failure cmd=%s", cmd);
+            }
+
+            netdev_sim_rmac_handle_allocate(netdev_);
+            ovs_assert(netdev->rmac_handle != SWITCH_API_INVALID_HANDLE);
+            /*
+             * TBD: call a function to return bn handle.
+             */
+            bn_rmac_handle = netdev->rmac_handle;
+            VLOG_INFO("switch_api_rmac_handle bn 0x%x", bn_rmac_handle);
+        }
     } else {
-        VLOG_ERR("Invalid mac address %s", mac_addr);
+        /*
+         * TODO: Can we get the netdev of bridge_normal here ?
+         * parent_intf_name and sunintf_parent does not work.
+         * Adding a global handle for bridge normal and moving on.
+         */
+        netdev->hostif_handle = bn_hostif_handle;
+        netdev->rmac_handle = bn_rmac_handle;
+        VLOG_INFO("VI rmac 0x%x hositf 0x%x",
+                   bn_rmac_handle,
+                   bn_hostif_handle);
+        VLOG_INFO("hostif handle 0x%x for intf %s",
+                   netdev->hostif_handle,
+                   netdev->linux_intf_name);
     }
+
     ovs_mutex_unlock(&netdev->mutex);
     return 0;
 }
@@ -192,12 +317,16 @@ netdev_sim_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
 
     strncpy(netdev->linux_intf_name, netdev->up.name, sizeof(netdev->linux_intf_name));
 
-    VLOG_INFO("set_hw_intf for interface, %s", netdev->linux_intf_name);
+    VLOG_DBG("set_hw_intf for interface, %s", netdev->linux_intf_name);
 
     /* There are no splittable interfaces supported by P4 model */
     if ((is_splittable && !strncmp(is_splittable, "true", 4)) ||
         (mac_addr == NULL) || split_parent) {
-        VLOG_DBG("Split interface or NULL MAC is not supported- parent i/f %s",
+        VLOG_INFO("is_splittable %s mac_addr %s split_parent %s",
+                   is_splittable ? is_splittable : "NULL",
+                   mac_addr ? mac_addr : "NULL",
+                   split_parent ? split_parent : "NULL");
+        VLOG_ERR("Split interface or NULL MAC is not supported- parent i/f %s",
                     split_parent ? split_parent : "NotSpecified");
         ovs_mutex_unlock(&netdev->mutex);
         return EINVAL;
@@ -215,6 +344,9 @@ netdev_sim_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
                 struct ether_addr *ether_mac = ether_aton(mac_addr);
                 if (ether_mac != NULL) {
                     memcpy(netdev->hwaddr, ether_mac, ETH_ALEN);
+                    netdev_sim_rmac_handle_allocate(netdev_);
+                    ovs_assert(netdev->rmac_handle != SWITCH_API_INVALID_HANDLE);
+                    VLOG_INFO("switch_api_rmac_handle bn 0x%x", netdev->rmac_handle);
                 }
             }
 
@@ -227,11 +359,54 @@ netdev_sim_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
             }
             if (netdev->hostif_handle == SWITCH_API_INVALID_HANDLE) {
                 switch_hostif_t     hostif;
+                switch_status_t     status = SWITCH_STATUS_SUCCESS;
+
                 memset(&hostif, 0, sizeof(hostif));
-                hostif.handle = netdev->port_handle;
                 strncpy(hostif.intf_name, netdev->linux_intf_name, sizeof(hostif.intf_name));
                 netdev->hostif_handle = switch_api_hostif_create(0, &hostif);
                 VLOG_INFO("switch_api_hostif_create handle 0x%x", netdev->hostif_handle);
+
+                switch_packet_tx_key_t tx_key;
+                switch_packet_tx_action_t tx_action;
+                memset(&tx_key, 0x0, sizeof(tx_key));
+                memset(&tx_action, 0x0, sizeof(tx_action));
+                tx_key.handle_valid = true;
+                tx_key.hostif_handle = netdev->hostif_handle;
+                tx_key.vlan_valid = false;
+                tx_key.priority = 1000;
+                tx_action.handle = 0;
+                tx_action.bypass_flags = SWITCH_BYPASS_ALL;
+                tx_action.port_handle = netdev->port_handle;
+
+                status = switch_api_packet_net_filter_tx_create(
+                             0x0,
+                             &tx_key,
+                             &tx_action);
+                if (status != SWITCH_STATUS_SUCCESS) {
+                    VLOG_ERR("packet net filter tx create failed");
+                }
+
+                switch_packet_rx_key_t rx_key;
+                switch_packet_rx_action_t rx_action;
+                memset(&rx_key, 0x0, sizeof(rx_key));
+                memset(&rx_action, 0x0, sizeof(rx_action));
+                rx_key.port_valid = true;
+                rx_key.port_handle = netdev->port_handle;
+                rx_key.port_lag_valid = false;
+                rx_key.handle_valid = false;
+                rx_key.reason_code_valid = false;
+                rx_key.priority = 1000;
+                rx_action.hostif_handle = netdev->hostif_handle;
+                rx_action.vlan_id = 0;
+                rx_action.vlan_action = SWITCH_PACKET_VLAN_NONE;
+
+                status = switch_api_packet_net_filter_rx_create(
+                             0x0,
+                             &rx_key,
+                             &rx_action);
+                if (status != SWITCH_STATUS_SUCCESS) {
+                    VLOG_ERR("packet net filter rx create failed");
+                }
             }
         } else {
             VLOG_ERR("No hw_id available");
@@ -550,6 +725,32 @@ int netdev_get_device_port_handle(struct netdev *netdev_,
     *device = 0;
     *port_handle = netdev->port_handle;
     return 0;
+}
+
+switch_handle_t
+netdev_get_hostif_handle(struct netdev *netdev_)
+{
+    switch_handle_t hostif_handle = SWITCH_API_INVALID_HANDLE;
+    struct netdev_sim *netdev = netdev_sim_cast(netdev_);
+
+    if (netdev) {
+        hostif_handle = netdev->hostif_handle;
+    }
+
+    return hostif_handle;
+}
+
+switch_handle_t
+netdev_get_rmac_handle(struct netdev *netdev_)
+{
+    switch_handle_t rmac_handle = SWITCH_API_INVALID_HANDLE;
+    struct netdev_sim *netdev = netdev_sim_cast(netdev_);
+
+    if (netdev) {
+        rmac_handle = netdev->rmac_handle;
+    }
+
+    return rmac_handle;
 }
 
 static const struct netdev_class sim_class = {
