@@ -33,6 +33,8 @@
 
 VLOG_DEFINE_THIS_MODULE(P4_sim_plugin);
 
+extern void p4_ofproto_init(void);
+
 void
 init(void)
 {
@@ -64,4 +66,5 @@ void
 ofproto_register(void)
 {
     ofproto_class_register(&ofproto_sim_provider_class);
+    p4_ofproto_init();
 }
