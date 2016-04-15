@@ -77,6 +77,8 @@ struct ofbundle {
 
     char *ip4_address;
     char *ip6_address;
+
+    bool filter_created;
 };
 
 struct sim_provider_ofport {
@@ -168,9 +170,6 @@ struct sim_provider_node {
     bool vrf;                   /* Specifies whether specific ofproto instance
                                  * is backing up VRF and not bridge */
     switch_handle_t vrf_handle; /* vrf id handle */
-
-    switch_mac_addr_t mac;      /* system router mac address */
-    switch_handle_t rmac_handle; /* router mac handle */
 };
 
 struct sim_provider_port_dump_state {
