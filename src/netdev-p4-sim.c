@@ -74,6 +74,7 @@ struct netdev_sim {
     bool autoneg;
     bool pause_tx;
     bool pause_rx;
+    bool bridge;
 
     /* p4 target related information */
     uint32_t port_num;
@@ -130,6 +131,7 @@ netdev_sim_construct(struct netdev *netdev_)
     netdev->hostif_handle = SWITCH_API_INVALID_HANDLE;
     netdev->port_handle = SWITCH_API_INVALID_HANDLE;
     netdev->rmac_handle = SWITCH_API_INVALID_HANDLE;
+    netdev->bridge = false;
     ovs_mutex_unlock(&netdev->mutex);
 
     ovs_mutex_lock(&sim_list_mutex);
@@ -178,7 +180,7 @@ netdev_sim_rmac_handle_allocate(struct netdev *netdev_)
                      0x0,
                      netdev->rmac_handle,
                      &mac);
-        VLOG_INFO("mac %2x:%2x:%2x:%2x:%2x:%2x",
+        VLOG_DBG("rmac_handle_allocate mac %2x:%2x:%2x:%2x:%2x:%2x",
                    netdev->hwaddr[0],
                    netdev->hwaddr[1],
                    netdev->hwaddr[2],
@@ -210,12 +212,18 @@ netdev_sim_rmac_handle_deallocate(struct netdev *netdev_)
                      netdev->rmac_handle,
                      &mac);
         ovs_assert(status == SWITCH_STATUS_SUCCESS);
-
         if (status != SWITCH_STATUS_SUCCESS) {
             VLOG_ERR("rmac handle allocate failed");
             return EINVAL;
         }
+
         status = switch_api_router_mac_group_delete(0x0, netdev->rmac_handle);
+        ovs_assert(status == SWITCH_STATUS_SUCCESS);
+        if (status != SWITCH_STATUS_SUCCESS) {
+            VLOG_ERR("rmac handle allocate failed");
+            return EINVAL;
+        }
+        netdev->rmac_handle = SWITCH_API_INVALID_HANDLE;
     }
     return 0;
 }
@@ -280,11 +288,13 @@ netdev_sim_internal_set_hw_intf_info(struct netdev *netdev_, const struct smap *
              */
             bn_rmac_handle = netdev->rmac_handle;
             VLOG_INFO("switch_api_rmac_handle bn 0x%x", bn_rmac_handle);
+
+            netdev->bridge = true;
         }
     } else {
         /*
          * TODO: Can we get the netdev of bridge_normal here ?
-         * parent_intf_name and sunintf_parent does not work.
+         * parent_intf_name and subintf_parent does not work.
          * Adding a global handle for bridge normal and moving on.
          */
         netdev->hostif_handle = bn_hostif_handle;
