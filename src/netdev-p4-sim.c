@@ -330,13 +330,12 @@ netdev_sim_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
     VLOG_DBG("set_hw_intf for interface, %s", netdev->linux_intf_name);
 
     /* There are no splittable interfaces supported by P4 model */
-    if ((is_splittable && !strncmp(is_splittable, "true", 4)) ||
-        (mac_addr == NULL) || split_parent) {
-        VLOG_INFO("is_splittable %s mac_addr %s split_parent %s",
+    if ((is_splittable && !strncmp(is_splittable, "true", 4)) || split_parent) {
+        VLOG_INFO("Intf: %s is_splittable %s split_parent %s",
+                   netdev->linux_intf_name,
                    is_splittable ? is_splittable : "NULL",
-                   mac_addr ? mac_addr : "NULL",
                    split_parent ? split_parent : "NULL");
-        VLOG_ERR("Split interface or NULL MAC is not supported- parent i/f %s",
+        VLOG_ERR("Split interface is not supported- parent i/f %s",
                     split_parent ? split_parent : "NotSpecified");
         ovs_mutex_unlock(&netdev->mutex);
         return EINVAL;
@@ -420,8 +419,9 @@ netdev_sim_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
             }
         } else {
             VLOG_ERR("No hw_id available");
-            ovs_mutex_unlock(&netdev->mutex);
-            return EINVAL;
+            // This fn should not be called for loopback interface
+            // but switchd seems to be calling it
+            // So... don't return - could be a loopback interface
         }
     }
 
@@ -438,14 +438,14 @@ netdev_sim_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
 
     if(mac_addr != NULL) {
         strncpy(netdev->hw_addr_str, mac_addr, sizeof(netdev->hw_addr_str));
+
+        sprintf(cmd, "%s /sbin/ip link set %s address %s",
+                SWNS_EXEC, netdev->up.name, netdev->hw_addr_str);
+        if (system(cmd) != 0) {
+            VLOG_ERR("NETDEV-SIM | system command failure cmd=%s", cmd);
+        }
     } else {
         VLOG_ERR("Invalid mac address %s", mac_addr);
-    }
-
-    sprintf(cmd, "%s /sbin/ip link set %s address %s",
-            SWNS_EXEC, netdev->up.name, netdev->hw_addr_str);
-    if (system(cmd) != 0) {
-        VLOG_ERR("NETDEV-SIM | system command failure cmd=%s", cmd);
     }
 
     sprintf(cmd, "%s /sbin/ip link set dev %s up",

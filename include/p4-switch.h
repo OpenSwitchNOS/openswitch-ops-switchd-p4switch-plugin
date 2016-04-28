@@ -31,6 +31,7 @@
 #include "switchapi/switch_rmac.h"
 #include "switchapi/switch_neighbor.h"
 #include "switchapi/switch_lag.h"
+#include "switchapi/switch_log.h"
 
 #define MAX_P4_SWITCH_PORTS 64
 
