@@ -211,6 +211,16 @@ p4_ofproto_install_l3_acl()
         VLOG_ERR("failed to create acl for ospfv6 : rc %d",
             rc);
     }
+
+    api_rcode_info.reason_code = SWITCH_HOSTIF_REASON_CODE_IPV6_NEIGHBOR_DISCOVERY;
+    rc = switch_api_hostif_reason_code_create(
+                             0x0,
+                             &api_rcode_info);
+    if (rc != SWITCH_STATUS_SUCCESS) {
+        VLOG_ERR("failed to create acl for ipv6_nd : rc %d",
+            rc);
+    }
+
     api_rcode_info.reason_code = SWITCH_HOSTIF_REASON_CODE_L3_REDIRECT;
     rc = switch_api_hostif_reason_code_create(
                              0x0,
@@ -2813,20 +2823,20 @@ l3_route_action(const struct ofproto *ofproto,
             return EINVAL;
     }
 
-    VLOG_INFO("is v6 addr: %d", (int)is_ipv6_addr);
-    VLOG_INFO("ip addr: %s", of_routep->prefix);
+    VLOG_INFO("l3_route_action: is v6 addr: %d", (int)is_ipv6_addr);
+    VLOG_INFO("l3_route_action: ip addr: %s", of_routep->prefix);
 
     switch (action) {
         case OFPROTO_ROUTE_ADD:
-            VLOG_INFO("received route add");
+            VLOG_INFO("l3_route_action: received route add");
             rc = l3_route_entry_add(ofproto, of_routep, &ip_address);
             break;
         case OFPROTO_ROUTE_DELETE:
-            VLOG_INFO("received route delete");
+            VLOG_INFO("l3_route_action: received route delete");
             rc = l3_route_entry_delete(ofproto, of_routep, &ip_address);
             break;
         case OFPROTO_ROUTE_DELETE_NH:
-            VLOG_INFO("received delete nhop");
+            VLOG_INFO("l3_route_action: received delete nhop");
             rc = l3_nhop_entry_delete(ofproto, of_routep, &ip_address);
             break;
         default:
