@@ -332,7 +332,8 @@ netdev_sim_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
     /* There are no splittable interfaces supported by P4 model */
     if ((is_splittable && !strncmp(is_splittable, "true", 4)) ||
         (mac_addr == NULL) || split_parent) {
-        VLOG_INFO("is_splittable %s mac_addr %s split_parent %s",
+        VLOG_INFO("Intf: %s is_splittable %s mac_addr %s split_parent %s",
+                   netdev->linux_intf_name,
                    is_splittable ? is_splittable : "NULL",
                    mac_addr ? mac_addr : "NULL",
                    split_parent ? split_parent : "NULL");

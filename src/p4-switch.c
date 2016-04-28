@@ -32,7 +32,7 @@
 #include "openvswitch/vlog.h"
 #include "p4-switch.h"
 
-VLOG_DEFINE_THIS_MODULE(P4_switch_sim_plugin);
+VLOG_DEFINE_THIS_MODULE(P4_switch_api);
 
 /* netlink socket to emulns namespace - to get interface stats */
 static int emulns_nl_sockfd;
@@ -68,6 +68,61 @@ emulns_nl_sock_init()
     emulns_nl_sockfd = sock;
 }
 
+int
+p4_to_ops_log_level(switch_api_log_level_t level)
+{
+    switch (level)
+    {
+        case SWITCH_API_LOG_ERROR:
+            return VLL_ERR;
+        case SWITCH_API_LOG_WARN:
+            return VLL_WARN;
+        case SWITCH_API_LOG_INFO:
+            return VLL_INFO;
+        case SWITCH_API_LOG_VERBOSE:
+        case SWITCH_API_LOG_TRACE:
+            return VLL_DBG;
+        default:
+            return VLL_OFF;
+    }
+    return VLL_OFF;
+}
+
+bool
+p4_switch_api_log_level_check(switch_api_log_level_t level)
+{
+    return vlog_is_enabled(&VLM_P4_switch_api, p4_to_ops_log_level(level));
+}
+
+int
+p4_switch_api_logger(switch_api_log_level_t level, char *fmt, ...)
+{
+    va_list args;
+    char buf[512];
+    
+    if (!p4_switch_api_log_level_check(level)) {
+        return 0;
+    }
+    va_start(args, fmt);
+    vsnprintf(buf, 512, fmt, args);
+
+    switch (level)
+    {
+        case SWITCH_API_LOG_ERROR:
+            VLOG_ERR(buf); break;
+        case SWITCH_API_LOG_WARN:
+            VLOG_WARN(buf); break;
+        case SWITCH_API_LOG_INFO:
+            VLOG_INFO(buf); break;
+        case SWITCH_API_LOG_VERBOSE:
+        case SWITCH_API_LOG_TRACE:
+        default:
+            VLOG_DBG(buf); break;
+    }
+    va_end(args);
+    return 1;
+}
+
 void
 p4_switch_init ()
 {
@@ -97,6 +152,8 @@ p4_switch_init ()
     p4_pd_dc_assign_device(0, "ipc:///tmp/bmv2-0-notifications.ipc", 10001);
     /* Initialize cpu interface between model and the plugin - this is done internally by api_init */
     switch_api_init(0, MAX_P4_SWITCH_PORTS+1);  /* add 1 port cpu port */
+    /* register logger function to send switchapi logs to vlog infra */
+    switch_api_log_function_set(p4_switch_api_logger);
     start_switch_api_packet_driver();
     /* attach to swns for the rest of the processing */
     if (swns_fd >= 0) {
