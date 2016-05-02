@@ -20,6 +20,22 @@ by the bridge software, and they abstract the forwarding device implementation.
 This plugin provides the glue logic to connect netdev and ofproto class functions to
 underlying switchapi functions to program the P4 pipeline.
 
+How to build and run P4 plugin?
+-------------------------------
+The P4 plugin is activated adding the following line in <workspace>/build/conf/local.conf
+EXTRA_IMAGE_FEATURES = "ops-p4"  (use += if other image features are defined)
+Steps -
+* clone new ops-build repo
+* cd <ops-build>
+* make header
+* echo "EXTRA_IMAGE_FEATURES += \"ops-p4\"" >> build/conf/local.conf
+* make clean
+* make
+* make export_docker_image
+
+The above steps build a container image with P4 simulator and P4 plugin as part of it.
+All the tests can be run against it as well as the container can be used in any mininet
+topologies.
 
 What is the structure of the repository?
 ----------------------------------------
@@ -76,15 +92,15 @@ L3 features:
 - L3 LAG interfaces
 - L3 unicast static and dynamic routing (default VRF)
 - ECMP support
+- VLAN interface
 
 TODO List:
 ----------
 This is a list of things that belong to supported features, but not done yet.
 Look for XXX or TODO comments in the code for detail information.
-- LAG hash selection
-- ECMP hash selection
+- LAG hash key selection
+- ECMP hash key selection
 - Expose learnt MACs to upport layers
 - Support native-tagged modes on a trunk port, currently only native-untagged is supported
 - Make-before-brake logic should be used when converting a single port to LAG
-- VLAN interface
 - Sub-interfaces
