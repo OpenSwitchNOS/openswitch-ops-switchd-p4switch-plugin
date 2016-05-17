@@ -66,7 +66,7 @@ struct netdev_sim {
     struct netdev_stats stats OVS_GUARDED;
     enum netdev_flags flags OVS_GUARDED;
 
-    char linux_intf_name[16];
+    char linux_intf_name[IFNAMSIZ];
     int link_state;
     uint32_t hw_info_link_speed;
     uint32_t link_speed;
@@ -81,6 +81,8 @@ struct netdev_sim {
     switch_handle_t hostif_handle;
     switch_handle_t port_handle;
     switch_handle_t rmac_handle;
+    switch_vlan_t subintf_vlan_id;
+    char parent_netdev_name[IFNAMSIZ];
 };
 
 static int netdev_sim_construct(struct netdev *);
@@ -132,6 +134,8 @@ netdev_sim_construct(struct netdev *netdev_)
     netdev->port_handle = SWITCH_API_INVALID_HANDLE;
     netdev->rmac_handle = SWITCH_API_INVALID_HANDLE;
     netdev->bridge = false;
+    netdev->subintf_vlan_id = 0;
+    netdev->parent_netdev_name[0] = 0;
     ovs_mutex_unlock(&netdev->mutex);
 
     ovs_mutex_lock(&sim_list_mutex);
@@ -484,8 +488,19 @@ netdev_sim_internal_set_hw_intf_config(struct netdev *netdev_, const struct smap
 
     ovs_mutex_lock(&netdev->mutex);
     strncpy(netdev->linux_intf_name, netdev->up.name, sizeof(netdev->linux_intf_name));
-    VLOG_INFO("TBD - netdev_sim_internal_set_hw_intf_config for %s, enable %d",
+    VLOG_INFO("netdev_sim_internal_set_hw_intf_config for %s, enable %d",
                netdev->linux_intf_name, hw_enable);
+
+    /* If interface is enabled */
+    if (hw_enable) {
+        netdev->flags |= NETDEV_UP;
+        netdev->link_state = 1;
+    } else {
+        netdev->flags &= ~NETDEV_UP;
+        netdev->link_state = 0;
+    }
+
+    netdev_change_seq_changed(netdev_);
     ovs_mutex_unlock(&netdev->mutex);
     return 0;
 }
@@ -585,7 +600,7 @@ netdev_sim_set_etheraddr(struct netdev *netdev,
     return 0;
 }
 
-extern int
+int
 netdev_sim_get_etheraddr(const struct netdev *netdev,
                            struct eth_addr *mac)
 {
@@ -596,6 +611,18 @@ netdev_sim_get_etheraddr(const struct netdev *netdev,
     ovs_mutex_unlock(&dev->mutex);
 
     return 0;
+}
+
+void
+netdev_sim_get_subintf_vlan(struct netdev *netdev, switch_vlan_t *vlan)
+{
+    struct netdev_sim *dev = netdev_sim_cast(netdev);
+    ovs_assert(is_sim_class(netdev_get_class(netdev)));
+
+    ovs_mutex_lock(&dev->mutex);
+    VLOG_DBG("get subinterface vlan as %d\n", dev->subintf_vlan_id);
+    *vlan = dev->subintf_vlan_id;
+    ovs_mutex_unlock(&dev->mutex);
 }
 
 static int
@@ -700,15 +727,55 @@ netdev_sim_update_flags(struct netdev *netdev_,
 {
     struct netdev_sim *netdev = netdev_sim_cast(netdev_);
 
-    /* HALON_TODO: Currently we are not supporting changing the
+    /* TODO: Currently we are not supporting changing the
      * configuration using the FLAGS. So ignoring the
      * incoming on/off flags. */
-    if ((off | on) & ~(NETDEV_UP | NETDEV_PROMISC)) {
-        return EINVAL;
-    }
 
     ovs_mutex_lock(&netdev->mutex);
     *old_flagsp = netdev->flags;
+    ovs_mutex_unlock(&netdev->mutex);
+
+    return 0;
+}
+
+static int
+netdev_sim_subinterface_update_flags(struct netdev *netdev_,
+                                    enum netdev_flags off,
+                                    enum netdev_flags on,
+                                    enum netdev_flags *old_flagsp)
+{
+    int rc = 0;
+    int state = 0;
+    enum netdev_flags parent_flags = 0;
+    struct netdev *parent = NULL;
+    struct netdev_sim *parent_netdev = NULL;
+
+    /*  We ignore the incoming flags as the underlying hardware responsible to
+     *  change the status of the flags is absent. Thus, we set new flags to
+     *  preconfigured values. */
+    struct netdev_sim *netdev = netdev_sim_cast(netdev_);
+    VLOG_DBG("%s Netdev name=%s",
+             __FUNCTION__, netdev->up.name);
+
+    /* Use subinterface netdev to get the parent netdev by name*/
+    if (strlen(netdev->parent_netdev_name)) {
+        parent = netdev_from_name(netdev->parent_netdev_name);
+        if (parent != NULL) {
+            parent_netdev = netdev_sim_cast(parent);
+
+            ovs_mutex_lock(&parent_netdev->mutex);
+
+            parent_flags = parent_netdev->flags;
+            ovs_mutex_unlock(&parent_netdev->mutex);
+            /* netdev_from_name() opens a reference, so we need to close it here. */
+            netdev_close(parent);
+        }
+    }
+    VLOG_DBG("%s parent flags = %d",__FUNCTION__, parent_flags);
+
+    ovs_mutex_lock(&netdev->mutex);
+    VLOG_DBG("%s netdev flags = %d",__FUNCTION__, netdev->flags);
+    *old_flagsp = netdev->flags & parent_flags;
     ovs_mutex_unlock(&netdev->mutex);
 
     return 0;
@@ -726,6 +793,39 @@ netdev_sim_get_carrier(const struct netdev *netdev_, bool *carrier)
     return 0;
 }
 
+static int
+netdev_sim_subintf_set_config(struct netdev *netdev_, const struct smap *args)
+{
+    struct netdev_sim *netdev = netdev_sim_cast(netdev_);
+    struct netdev *parent = NULL;
+    struct netdev_sim *parent_netdev = NULL;
+    const char *parent_intf_name = NULL;
+    int vlanid = 0;
+
+    ovs_mutex_lock(&netdev->mutex);
+    parent_intf_name = smap_get(args, "parent_intf_name");
+    vlanid = smap_get_int(args, "vlan", 0);
+
+    if (parent_intf_name != NULL) {
+        VLOG_DBG("netdev set_config parent interface %s, and vlan = %d",
+                parent_intf_name, vlanid);
+        parent = netdev_from_name(parent_intf_name);
+        if (parent != NULL) {
+            parent_netdev = netdev_sim_cast(parent);
+            netdev->port_num = parent_netdev->port_num;
+            netdev->port_handle = parent_netdev->port_handle;
+            memcpy(netdev->hwaddr, parent_netdev->hwaddr, ETH_ALEN);
+            netdev->subintf_vlan_id = vlanid;
+            strncpy(netdev->parent_netdev_name, parent_intf_name, IFNAMSIZ);
+            VLOG_DBG("Parent found, netdev vlan set = %d",
+                            vlanid);
+            netdev_close(parent);
+        }
+    }
+
+    ovs_mutex_unlock(&netdev->mutex);
+    return 0;
+}
 /* Helper functions. */
 int netdev_get_device_port_handle(struct netdev *netdev_,
                 int32_t *device, switch_handle_t *port_handle)
@@ -759,6 +859,36 @@ netdev_get_rmac_handle(struct netdev *netdev_)
         rmac_handle = netdev->rmac_handle;
     }
 
+    return rmac_handle;
+}
+
+switch_handle_t
+netdev_get_subinterface_parent_rmac_handle(struct netdev *netdev_)
+{
+    switch_handle_t rmac_handle = SWITCH_API_INVALID_HANDLE;
+    struct netdev_sim *netdev = netdev_sim_cast(netdev_);
+    struct netdev *parent = NULL;
+    struct netdev_sim *parent_netdev = NULL;
+
+    /*  We ignore the incoming flags as the underlying hardware responsible to
+     *  change the status of the flags is absent. Thus, we set new flags to
+     *  preconfigured values. */
+    ovs_mutex_lock(&netdev->mutex);
+
+    /* get the parent netdev by name */
+    if (strlen(netdev->parent_netdev_name)) {
+        parent = netdev_from_name(netdev->parent_netdev_name);
+        if (parent != NULL) {
+            parent_netdev = netdev_sim_cast(parent);
+            ovs_mutex_lock(&parent_netdev->mutex);
+            rmac_handle = parent_netdev->rmac_handle;
+            ovs_mutex_unlock(&parent_netdev->mutex);
+            /* netdev_from_name() opens a reference, so we need to close it here. */
+            netdev_close(parent);
+        }
+    }
+
+    ovs_mutex_unlock(&netdev->mutex);
     return rmac_handle;
 }
 
@@ -972,10 +1102,81 @@ static const struct netdev_class sim_loopback_class = {
     NULL,                       /* rxq_drain */
 };
 
+static const struct netdev_class sim_subinterface_class = {
+    "vlansubint",
+    NULL,                       /* init */
+    netdev_sim_run,
+    NULL,                       /* wait */
+
+    netdev_sim_alloc,
+    netdev_sim_construct,
+    netdev_sim_destruct,
+    netdev_sim_dealloc,
+    NULL,                       /* get_config */
+    netdev_sim_subintf_set_config,                       /* set_config */
+    NULL,
+    netdev_sim_internal_set_hw_intf_config,
+    NULL,                       /* get_tunnel_config */
+    NULL,                       /* build header */
+    NULL,                       /* push header */
+    NULL,                       /* pop header */
+    NULL,                       /* get_numa_id */
+    NULL,                       /* set_multiq */
+
+    NULL,                       /* send */
+    NULL,                       /* send_wait */
+
+    netdev_sim_set_etheraddr,
+    netdev_sim_get_etheraddr,
+    NULL,                       /* get_mtu */
+    NULL,                       /* set_mtu */
+    NULL,                       /* get_ifindex */
+    netdev_sim_get_carrier,
+    NULL,                       /* get_carrier_resets */
+    NULL,                       /* get_miimon */
+    netdev_sim_internal_get_stats,
+
+    netdev_sim_get_features,    /* get_features */
+    NULL,                       /* set_advertisements */
+
+    NULL,                       /* set_policing */
+    NULL,                       /* get_qos_types */
+    NULL,                       /* get_qos_capabilities */
+    NULL,                       /* get_qos */
+    NULL,                       /* set_qos */
+    NULL,                       /* get_queue */
+    NULL,                       /* set_queue */
+    NULL,                       /* delete_queue */
+    NULL,                       /* get_queue_stats */
+    NULL,                       /* queue_dump_start */
+    NULL,                       /* queue_dump_next */
+    NULL,                       /* queue_dump_done */
+    NULL,                       /* dump_queue_stats */
+
+    NULL,                       /* get_in4 */
+    NULL,                       /* set_in4 */
+    NULL,                       /* get_in6 */
+    NULL,                       /* add_router */
+    NULL,                       /* get_next_hop */
+    NULL,                       /* get_status */
+    NULL,                       /* arp_lookup */
+
+    netdev_sim_subinterface_update_flags,
+
+    NULL,                       /* rxq_alloc */
+    NULL,                       /* rxq_construct */
+    NULL,                       /* rxq_destruct */
+    NULL,                       /* rxq_dealloc */
+    NULL,                       /* rxq_recv */
+    NULL,                       /* rxq_wait */
+    NULL,                       /* rxq_drain */
+};
+
 void
 netdev_sim_register(void)
 {
     netdev_register_provider(&sim_class);
     netdev_register_provider(&sim_internal_class);
     netdev_register_provider(&sim_loopback_class);
+    netdev_register_provider(&sim_subinterface_class);
 }
