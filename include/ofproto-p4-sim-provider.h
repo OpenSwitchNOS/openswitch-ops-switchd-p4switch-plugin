@@ -80,6 +80,7 @@ struct ofbundle {
     char *ip6_address;
 
     bool filter_created;
+    switch_vlan_t subintf_vlan; /* Vlan id for subinterface */
 };
 
 struct sim_provider_ofport {
