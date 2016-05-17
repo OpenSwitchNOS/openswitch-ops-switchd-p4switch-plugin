@@ -139,7 +139,8 @@ del(const char *type OVS_UNUSED, const char *name OVS_UNUSED)
 static const char *
 port_open_type(const char *datapath_type OVS_UNUSED, const char *port_type)
 {
-    if (port_type && (strcmp(port_type, OVSREC_INTERFACE_TYPE_INTERNAL) == 0)) {
+    if (port_type && ((strcmp(port_type, OVSREC_INTERFACE_TYPE_INTERNAL) == 0) ||
+            (strcmp(port_type, OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0))) {
         return port_type;
     }
     return "system";
@@ -819,8 +820,21 @@ p4_switch_interface_create (struct ofbundle *bundle)
         i_info.rmac_handle = netdev_get_rmac_handle(port->up.netdev);
 
         if (bundle->port_type == SWITCH_API_INTERFACE_L3_PORT_VLAN) {
+            i_info.rmac_handle = netdev_get_subinterface_parent_rmac_handle(port->up.netdev);
+            netdev_sim_get_subintf_vlan(port->up.netdev, &bundle->subintf_vlan);
+            VLOG_DBG("%s subinterface vlan %d", __FUNCTION__, bundle->subintf_vlan);
+
+            if(!bundle->subintf_vlan) {
+                /* If vlan id is still emtpy, interface cannot be created yet */
+                VLOG_DBG("switch_api_interface_create - type %d, vlan empty. "
+                          "Not creating subinterface",
+                            i_info.type, i_info.u.port_lag_handle);
+                return;
+            }
+
             i_info.u.port_vlan.port_lag_handle = bundle->port_lag_handle;
-            i_info.u.port_vlan.vlan_id = bundle->vlan;
+            i_info.u.port_vlan.vlan_id = bundle->subintf_vlan;
+
             VLOG_INFO("switch_api_interface_create - type %d, port_handle 0x%x vlan %d",
                         i_info.type, i_info.u.port_vlan.port_lag_handle,
                         i_info.u.port_vlan.vlan_id);
@@ -949,6 +963,8 @@ bundle_set(struct ofproto *ofproto_, void *aux,
     const char *type = NULL;
     struct sim_provider_ofport *port = NULL;
     bool skip_interface = false;
+    bool interface_recreate = false;
+    switch_vlan_t subintf_vlan_id = 0;
 
     bundle = bundle_lookup(ofproto, aux);
     if (s == NULL) {
@@ -1060,6 +1076,7 @@ found:     ;
         return 0;
     }
 
+
     /* Need to check the old and new bundle parmeters to handle transitions
      * Old          :   New
      * Access, v1   : Access, v2 -> delete pv1, create pv2
@@ -1091,6 +1108,13 @@ found:     ;
          */
         if (strcmp(type, OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0) {
             new_port_type = SWITCH_API_INTERFACE_L3_PORT_VLAN;
+            netdev_sim_get_subintf_vlan(port->up.netdev, &subintf_vlan_id);
+            /* Subinterface vlan changed or interface was never created */
+            if(subintf_vlan_id !=  bundle->subintf_vlan ||
+                bundle->if_handle == SWITCH_API_INVALID_HANDLE) {
+                interface_recreate = true;
+            }
+
         } else if (strcmp(type, OVSREC_INTERFACE_TYPE_INTERNAL) == 0) {
             new_port_type = SWITCH_API_INTERFACE_L3_VLAN;
             bundle->vlan = s->vlan;
@@ -1109,7 +1133,7 @@ found:     ;
         return 0;
     }
 
-    if (bundle->port_type != new_port_type) {
+    if (bundle->port_type != new_port_type || interface_recreate) {
         /* delete old interface and associated vlan_port */
         p4_switch_interface_delete(bundle);
         bundle->port_type = new_port_type;
@@ -1431,7 +1455,7 @@ port_del(struct ofproto *ofproto_, ofp_port_t ofp_port)
 {
     struct sim_provider_node *ofproto = sim_provider_node_cast(ofproto_);
     struct sim_provider_ofport *ofport = get_ofp_port(ofproto, ofp_port);
-    char *netdev_name = NULL;
+    const char *netdev_name = NULL;
 
     if (ofport == NULL) {
         VLOG_ERR("port_del - 0x%x invalid port", ofp_port);
