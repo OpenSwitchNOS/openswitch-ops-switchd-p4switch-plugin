@@ -27,6 +27,7 @@ EXTRA_IMAGE_FEATURES = "ops-p4"  (use += if other image features are defined)
 Steps -
 * clone new ops-build repo
 * cd <ops-build>
+* make configure genericx86-64
 * make header
 * echo "EXTRA_IMAGE_FEATURES += \"ops-p4\"" >> build/conf/local.conf
 * make clean
@@ -36,6 +37,23 @@ Steps -
 The above steps build a container image with P4 simulator and P4 plugin as part of it.
 All the tests can be run against it as well as the container can be used in any mininet
 topologies.
+
+Injecting ports to P4 simulator
+-------------------------------
+Once network interfaces which model front panel ports have been created
+(typically veth pairs with one end present in "emulns" namespace and the other
+end either bridged to physical NIC or connected to mininet hosts), they should
+be injected into P4 simulator. Execute following command from switch bash shell.
+This step is not required while running tests via frameworks like VSI, Modular
+Framework which internally take care of this requirement.
+
+```
+/sbin/ip netns exec emulns /sbin/ip link set <interface name> up
+/sbin/ip netns exec emulns echo port add <interface name> <port number> | /sbin/ip netns exec emulns /usr/bin/bm_tools/runtime_CLI.py --json /usr/share/ovs_p4_plugin/switch_bmv2.json --thrift-port 10001
+```
+
+Note that port numbering for P4 simulator starts from zero. Currently P4 simulator
+supports a total of 48 ports.
 
 What is the structure of the repository?
 ----------------------------------------
@@ -93,6 +111,7 @@ L3 features:
 - L3 unicast static and dynamic routing (default VRF)
 - ECMP support
 - VLAN interface
+- Sub-interfaces
 
 TODO List:
 ----------
@@ -103,4 +122,3 @@ Look for XXX or TODO comments in the code for detail information.
 - Expose learnt MACs to upport layers
 - Support native-tagged modes on a trunk port, currently only native-untagged is supported
 - Make-before-brake logic should be used when converting a single port to LAG
-- Sub-interfaces
