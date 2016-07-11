@@ -922,6 +922,7 @@ static const struct netdev_class sim_class = {
     NULL,                       /* get_carrier_resets */
     NULL,                       /* get_miimon */
     netdev_sim_get_stats,
+    NULL,                       /* clear statistics */
 
     netdev_sim_get_features,    /* get_features */
     NULL,                       /* set_advertisements */
@@ -992,6 +993,7 @@ static const struct netdev_class sim_internal_class = {
     NULL,                       /* get_carrier_resets */
     NULL,                       /* get_miimon */
     netdev_sim_internal_get_stats,
+    NULL,                       /* clear statistics */
 
     netdev_sim_get_features,    /* get_features */
     NULL,                       /* set_advertisements */
@@ -1062,6 +1064,7 @@ static const struct netdev_class sim_loopback_class = {
     NULL,                       /* get_carrier_resets */
     NULL,                       /* get_miimon */
     NULL,
+    NULL,                       /* clear statistics */
 
     netdev_sim_get_features,    /* get_features */
     NULL,                       /* set_advertisements */
