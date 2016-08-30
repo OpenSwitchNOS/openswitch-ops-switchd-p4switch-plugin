@@ -322,8 +322,6 @@ netdev_sim_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
     const char *max_speed = smap_get(args, INTERFACE_HW_INTF_INFO_MAP_MAX_SPEED);
     const char *mac_addr = smap_get(args, INTERFACE_HW_INTF_INFO_MAP_MAC_ADDR);
     const char *hw_id = smap_get(args, INTERFACE_HW_INTF_INFO_MAP_SWITCH_INTF_ID);
-    const char *is_splittable = smap_get(args, INTERFACE_HW_INTF_INFO_MAP_SPLIT_4);
-    const char *split_parent = smap_get(args, INTERFACE_HW_INTF_INFO_SPLIT_PARENT);
 
     char cmd[MAX_CMD_BUF];
 
@@ -333,25 +331,14 @@ netdev_sim_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
 
     VLOG_DBG("set_hw_intf for interface, %s", netdev->linux_intf_name);
 
-    /* There are no splittable interfaces supported by P4 model */
-    if ((is_splittable && !strncmp(is_splittable, "true", 4)) || split_parent) {
-        VLOG_INFO("Intf: %s is_splittable %s split_parent %s",
-                   netdev->linux_intf_name,
-                   is_splittable ? is_splittable : "NULL",
-                   split_parent ? split_parent : "NULL");
-        VLOG_ERR("Split interface is not supported- parent i/f %s",
-                    split_parent ? split_parent : "NotSpecified");
-        ovs_mutex_unlock(&netdev->mutex);
-        return EINVAL;
-    }
     if (netdev->port_handle == SWITCH_API_INVALID_HANDLE) {
         if (hw_id) {
             netdev->port_num = atoi(hw_id);
             /* switchapi uses 0 based port# */
             netdev->port_handle = id_to_handle(SWITCH_HANDLE_TYPE_PORT,
-                                                        netdev->port_num-1);
-            VLOG_INFO("set_hw_intf create tap interface for port, %d",
-                                                        netdev->port_num);
+                                               netdev->port_num-1);
+            VLOG_INFO("set_hw_intf create tap interface %s for port %d",
+                      netdev->linux_intf_name, netdev->port_num);
 
             if (mac_addr) {
                 struct ether_addr *ether_mac = ether_aton(mac_addr);
