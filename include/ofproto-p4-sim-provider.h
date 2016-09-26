@@ -59,6 +59,7 @@ struct ofbundle {
 
     enum port_vlan_mode vlan_mode;      /* VLAN mode */
     int vlan;                   /* native vlan */
+    int tunnel_key;             /* tunnel key of a logical sw,-1 (not used) */
     unsigned long *trunks;      /* Bitmap of allowed trunked VLANs */
     bool allow_all_trunks;      /* user did not specify trunks bitmap => allow all vlans */
     struct lacp *lacp;          /* LACP if LACP is enabled, otherwise NULL. */
@@ -198,6 +199,13 @@ struct ops_nexthop {
     switch_handle_t nhop_handle;
 };
 
+struct ops_neighbor {
+    struct hmap_node node;
+    uint32_t ip; //FIXME to take care of ip6
+    char * mac;
+    switch_handle_t neighbor_handle;
+    switch_handle_t nhop_handle;
+};
 /* Not used yet by P4 plugin. */
 enum { N_TABLES = 1 };
 enum { TBL_INTERNAL = N_TABLES - 1 };   /* Used for internal hidden rules. */

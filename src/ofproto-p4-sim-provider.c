@@ -36,6 +36,7 @@
 #include "vswitch-idl.h"
 
 #include "netdev-p4-sim.h"
+
 #include <netinet/ether.h>
 #include <assert.h>
 
@@ -46,6 +47,7 @@ VLOG_DEFINE_THIS_MODULE(P4_ofproto_provider_sim);
 
 #define VLAN_BITMAP_SIZE        4096
 #define P4_HANDLE_IS_VALID(_h)  ((_h) != SWITCH_API_INVALID_HANDLE)
+#define IPV4_BIT_LEN 32
 
 static void p4_switch_vlan_port_delete (struct ofbundle *bundle, int32_t vlan);
 static void p4_switch_interface_delete (struct ofbundle *bundle);
@@ -55,11 +57,12 @@ static void rule_get_stats(struct rule *, uint64_t * packets,
 static void bundle_remove(struct ofport *);
 static struct sim_provider_ofport *get_ofp_port(const struct sim_provider_node
                                                 *ofproto, ofp_port_t ofp_port);
+static struct ops_neighbor* get_nexthop(struct netdev *netdev);
 
 static struct hmap l3_route_table;
 static int g_vlans_ref;
 static struct hmap g_vlans; // global vlan map that is shared across L2 vlans and vlan intf
-
+static struct hmap neighbor_table;
 void
 p4_ofproto_init()
 {
@@ -140,12 +143,129 @@ static const char *
 port_open_type(const char *datapath_type OVS_UNUSED, const char *port_type)
 {
     if (port_type && ((strcmp(port_type, OVSREC_INTERFACE_TYPE_INTERNAL) == 0) ||
-            (strcmp(port_type, OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0))) {
+            (strcmp(port_type, OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0) ||
+            (strcmp(port_type, OVSREC_INTERFACE_TYPE_VXLAN) == 0))) {
         return port_type;
     }
     return "system";
 }
 
+static int
+ip_string_to_prefix(
+        bool is_ipv6,
+        char *ip_address,
+        void *prefix,
+        int *prefixlen)
+{
+    char *p;
+    char *tmp_ip_addr;
+    int maxlen =  is_ipv6 ? 128 : 32;
+
+    *prefixlen = maxlen;
+    tmp_ip_addr = strdup(ip_address);
+
+    if ((p = strchr(tmp_ip_addr, '/'))) {
+        *p++ = '\0';
+        *prefixlen = atoi(p);
+    }
+
+    if (*prefixlen > maxlen) {
+        VLOG_DBG("Bad prefixlen %d > %d", *prefixlen, maxlen);
+        free(tmp_ip_addr);
+        return EINVAL;
+    }
+
+    if (!is_ipv6) {
+        /* ipv4 address in host order */
+        in_addr_t *addr = (in_addr_t*)prefix;
+        *addr = inet_network(tmp_ip_addr);
+        if (*addr == -1) {
+            VLOG_ERR("Invalid ip address %s", ip_address);
+            free(tmp_ip_addr);
+            return EINVAL;
+        }
+    } else {
+        /* ipv6 address */
+        if (inet_pton(AF_INET6, tmp_ip_addr, prefix) == 0) {
+            VLOG_DBG("%d inet_pton failed with %s", is_ipv6, strerror(errno));
+            free(tmp_ip_addr);
+            return EINVAL;
+        }
+    }
+
+    free(tmp_ip_addr);
+    return 0;
+}
+
+switch_handle_t
+get_intf_handle_from_ip(switch_ip_addr_t *ip)
+{
+    struct ofbundle *bundle = NULL;
+    struct sim_provider_node *ofproto = NULL;
+    uint32_t ipv4_addr = 0;
+    uint8_t ipv6_addr[16];
+    int prefixlen = 0;
+
+    HMAP_FOR_EACH (ofproto, all_sim_provider_node,
+                   &all_sim_provider_nodes) {
+        if(ofproto->vrf) {
+            HMAP_FOR_EACH (bundle, hmap_node, &ofproto->bundles) {
+                if (bundle->ip4_address && ip->type == SWITCH_API_IP_ADDR_V4) {
+                    ip_string_to_prefix(SWITCH_API_IP_ADDR_V4,
+                            bundle->ip4_address,
+                            &ipv4_addr,
+                            &prefixlen);
+
+                    if(ipv4_addr == ip->ip.v4addr) {
+                        VLOG_INFO("%s : matching Out interface for tunnel is %lx",
+                                __func__, bundle->if_handle);
+                        return bundle->if_handle;
+                    }
+                }
+                else if (bundle->ip6_address && ip->type == SWITCH_API_IP_ADDR_V6) {
+                    ip_string_to_prefix(SWITCH_API_IP_ADDR_V6,
+                            bundle->ip6_address,
+                            &ipv6_addr,
+                            &prefixlen);
+                    VLOG_INFO("%s : ipv6 = %s handle = %d",
+                            __func__, bundle->ip6_address, bundle->if_handle);
+                    /* TODO compare and return IPv6 Address */
+                }
+            }
+        }
+    }
+    VLOG_INFO("%s : could not find matching Out interface for tunnel ",
+                __func__);
+    return 0;
+}
+
+switch_handle_t
+get_intf_handle_from_name(const char *if_name)
+{
+    struct ofbundle *bundle = NULL;
+    struct sim_provider_node *ofproto = NULL;
+    switch_handle_t handle = 0;
+
+    HMAP_FOR_EACH (ofproto, all_sim_provider_node,
+                   &all_sim_provider_nodes) {
+        HMAP_FOR_EACH (bundle, hmap_node, &ofproto->bundles) {
+            if (bundle->name && if_name && strcmp(bundle->name, if_name) == 0) {
+                    VLOG_INFO("%s : matching interface is %lx", __func__, bundle->if_handle);
+                    VLOG_INFO("%s : vlan %u", __func__, bundle->vlan);
+                    VLOG_INFO("%s : VLAN Mode %u", __func__, bundle->vlan_mode);
+                    VLOG_INFO("%s : port type %u", __func__, bundle->port_type);
+                    handle = bundle->if_handle;
+                    /* P4 does not support the same port to be part of VLAN as well as
+                     * logical network at the same time. Remove this access port from VLAN */
+                    p4_switch_vlan_port_delete(bundle, bundle->vlan);
+                    bitmap_set0(bundle->trunks, bundle->vlan);
+            }
+        }
+    }
+    VLOG_INFO("%s : could not find matching Out interface for tunnel ",
+                __func__);
+    return handle;
+}
 /* Basic life-cycle. */
 
 static struct ofproto *
@@ -313,6 +433,7 @@ construct(struct ofproto *ofproto_)
         ofproto->vrf_handle = switch_api_vrf_create(0, 1);
         p4_ofproto_install_l3_acl();
         hmap_init(&l3_route_table);
+        hmap_init(&neighbor_table);
     }
 
     ofproto_init_max_ports(ofproto_, MAX_P4_SWITCH_PORTS);
@@ -334,6 +455,7 @@ destruct(struct ofproto *ofproto_ OVS_UNUSED)
         }
 
         hmap_destroy(&l3_route_table);
+        hmap_destroy(&neighbor_table);
 
         p4_ofproto_uninstall_l3_acl();
     }
@@ -509,6 +631,25 @@ disable_port_in_iptables(const char *port_name)
 {
 }
 
+static int
+p4_vport_create(struct ofbundle *bundle, struct netdev *netdev)
+{
+    struct ops_neighbor*    nbor = NULL;
+    switch_handle_t         tunnel_handle = 0;
+    nbor = get_nexthop(netdev);
+    if(nbor != NULL) {
+        tunnel_handle = p4_ops_vport_create_tunnel(bundle, netdev);
+        if(tunnel_handle != SWITCH_API_INVALID_HANDLE){
+            ops_vport_tunnel_add_neighbor(bundle, tunnel_handle, nbor);
+        } else {
+            VLOG_INFO("Tunnel Interface creation failed");
+        }
+    } else {
+        VLOG_INFO("Tunnel Nexthop not available");
+    }
+    return 1;
+}
+
 static void
 p4_lag_port_update (switch_handle_t lag_handle,
                     struct sim_provider_ofport *port, bool add)
@@ -552,6 +693,7 @@ static bool
 bundle_add_port(struct ofbundle *bundle, ofp_port_t ofp_port)
 {
     struct sim_provider_ofport *port;
+    const char *type;
 
     port = get_ofp_port(bundle->ofproto, ofp_port);
     if (!port) {
@@ -564,6 +706,17 @@ bundle_add_port(struct ofbundle *bundle, ofp_port_t ofp_port)
         }
 
         port->bundle = bundle;
+        port->is_tunnel = false;
+        type = netdev_get_type(port->up.netdev);
+        VLOG_INFO("%s, netdev type = %s ",__func__, type);
+        if(!strcmp(type, OVSREC_INTERFACE_TYPE_VXLAN))
+        {
+            port->is_tunnel = true;
+            VLOG_INFO("%s, bundle_add_port vxlan bundle name %s, ofp_port %d",
+                                        __func__, bundle->name, (int)ofp_port);
+            p4_vport_create(bundle, port->up.netdev);
+        }
+
         list_push_back(&bundle->ports, &port->bundle_node);
         /* if lag is already create in h/w, add member port to it */
         if (bundle->is_lag) {
@@ -719,6 +872,7 @@ vlan_mode_to_port_type(int32_t vlan_mode, int32_t *port_type, int32_t *tag_mode)
     if (vlan_mode == PORT_VLAN_ACCESS) {
         *port_type = SWITCH_API_INTERFACE_L2_VLAN_ACCESS;
         *tag_mode = SWITCH_VLAN_PORT_UNTAGGED;
+        VLOG_INFO("Setting interface type to SWITCH_API_INTERFACE_L2_VLAN_ACCESS");
     } else if (vlan_mode == PORT_VLAN_TRUNK) {
         /* XXX - only untagged mode is support */
     } else if (vlan_mode == PORT_VLAN_NATIVE_TAGGED) {
@@ -953,6 +1107,7 @@ bundle_set(struct ofproto *ofproto_, void *aux,
     struct sim_provider_node *ofproto = sim_provider_node_cast(ofproto_);
     const struct ofport *ofport = NULL;
     bool ok = false;
+    bool tunnel = false;
     int ofp_port, i = 0, n = 0;
     char cmd_str[MAX_CMD_LEN];
     struct ofbundle *bundle;
@@ -990,6 +1145,7 @@ bundle_set(struct ofproto *ofproto_, void *aux,
         list_init(&bundle->ports);
         bundle->vlan_mode = PORT_VLAN_ACCESS;
         bundle->vlan = -1;
+        bundle->tunnel_key = -1;
         bundle->trunks = bitmap_allocate(VLAN_BITMAP_SIZE);
         bundle->allow_all_trunks = false;
         bundle->bond = NULL;
@@ -1038,8 +1194,8 @@ found:     ;
         return 0;
     }
 
-    VLOG_INFO("Bridge/VRF name=%s type=%s bundle=%s",
-             ofproto->up.name, ofproto->up.type, bundle->name);
+    VLOG_INFO("Bridge/VRF name=%s type=%s bundle=%s, vrf= %d",
+             ofproto->up.name, ofproto->up.type, bundle->name, ofproto->vrf);
 
     if(strcmp(bundle->name, "bridge_normal") == 0) {
         /* Setup system_Acl for the bridge
@@ -1096,6 +1252,7 @@ found:     ;
             // vlan interface is an L3 interface and is valid only on a vrf.
             // switchd seems to be creating it on bride-normal as well..
             // just create one to keep upper layers happy, no further processing is needed
+            VLOG_INFO("Setting interface type to SWITCH_API_INTERFACE_L3_VLAN");
             bundle->port_type = new_port_type = SWITCH_API_INTERFACE_L3_VLAN;
             bundle->vlan = s->vlan;
             skip_interface = true;
@@ -1107,6 +1264,7 @@ found:     ;
          * XXX: Handle vlan internal interface bundle
          */
         if (strcmp(type, OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0) {
+            VLOG_INFO("Setting interface type to SWITCH_API_INTERFACE_L3_PORT_VLAN");
             new_port_type = SWITCH_API_INTERFACE_L3_PORT_VLAN;
             netdev_sim_get_subintf_vlan(port->up.netdev, &subintf_vlan_id);
             /* Subinterface vlan changed or interface was never created */
@@ -1116,12 +1274,19 @@ found:     ;
             }
 
         } else if (strcmp(type, OVSREC_INTERFACE_TYPE_INTERNAL) == 0) {
+            VLOG_INFO("Setting interface type to SWITCH_API_INTERFACE_L3_VLAN");
             new_port_type = SWITCH_API_INTERFACE_L3_VLAN;
             bundle->vlan = s->vlan;
             // create the net filters, it implicitly creates vlan if not already
             // created
             p4_vlan_if_bundle_l3_filters_update(ofproto, bundle, true/*create*/);
+        } else if (strcmp(type, OVSREC_INTERFACE_TYPE_VXLAN) == 0) {
+            /* This is a VxLAN interface */
+            VLOG_INFO("Setting interface type to SWITCH_API_INTERFACE_TUNNEL");
+            new_port_type = SWITCH_API_INTERFACE_TUNNEL;
+
         } else {
+            VLOG_INFO("Setting interface type to SWITCH_API_INTERFACE_L3");
             new_port_type = SWITCH_API_INTERFACE_L3;
         }
     }
@@ -1133,7 +1298,8 @@ found:     ;
         return 0;
     }
 
-    if (bundle->port_type != new_port_type || interface_recreate) {
+    if (new_port_type != SWITCH_API_INTERFACE_TUNNEL &&
+            bundle->port_type != new_port_type || interface_recreate) {
         /* delete old interface and associated vlan_port */
         p4_switch_interface_delete(bundle);
         bundle->port_type = new_port_type;
@@ -1238,6 +1404,7 @@ found:     ;
         }
     } else if (new_port_type == SWITCH_API_INTERFACE_L3 ||
                new_port_type == SWITCH_API_INTERFACE_L3_PORT_VLAN ||
+               new_port_type == SWITCH_API_INTERFACE_TUNNEL ||
                new_port_type == SWITCH_API_INTERFACE_L3_VLAN) {
         port_ip_reconfigure(ofproto_, bundle, s);
     } else {
@@ -1703,52 +1870,7 @@ l3_route_nhop_glean_get()
     return switch_api_cpu_nhop_get(SWITCH_HOSTIF_REASON_CODE_GLEAN);
 }
 
-static int
-ip_string_to_prefix(
-        bool is_ipv6,
-        char *ip_address,
-        void *prefix,
-        int *prefixlen)
-{
-    char *p;
-    char *tmp_ip_addr;
-    int maxlen =  is_ipv6 ? 128 : 32;
 
-    *prefixlen = maxlen;
-    tmp_ip_addr = strdup(ip_address);
-
-    if ((p = strchr(tmp_ip_addr, '/'))) {
-        *p++ = '\0';
-        *prefixlen = atoi(p);
-    }
-
-    if (*prefixlen > maxlen) {
-        VLOG_DBG("Bad prefixlen %d > %d", *prefixlen, maxlen);
-        free(tmp_ip_addr);
-        return EINVAL;
-    }
-
-    if (!is_ipv6) {
-        /* ipv4 address in host order */
-        in_addr_t *addr = (in_addr_t*)prefix;
-        *addr = inet_network(tmp_ip_addr);
-        if (*addr == -1) {
-            VLOG_ERR("Invalid ip address %s", ip_address);
-            free(tmp_ip_addr);
-            return EINVAL;
-        }
-    } else {
-        /* ipv6 address */
-        if (inet_pton(AF_INET6, tmp_ip_addr, prefix) == 0) {
-            VLOG_DBG("%d inet_pton failed with %s", is_ipv6, strerror(errno));
-            free(tmp_ip_addr);
-            return EINVAL;
-        }
-    }
-
-    free(tmp_ip_addr);
-    return 0;
-}
 
 static int
 port_l3_host_add(struct ofproto *ofproto_, bool is_ipv6, char *ip_addr)
@@ -1922,6 +2044,34 @@ port_ip_reconfigure(struct ofproto *ofproto, struct ofbundle *bundle,
     return 0;
 }
 
+static struct ops_neighbor*
+neighbor_lookup_from_nexthop(switch_handle_t nhop_handle)
+{
+    struct ops_neighbor *nbor = NULL;
+    HMAP_FOR_EACH(nbor, node, &neighbor_table) {
+        if(nbor->nhop_handle == nhop_handle) {
+            VLOG_INFO("MHDBG Found neighbor 0x%x from nexthop handle 0x%x",
+                      nbor->neighbor_handle, nhop_handle);
+            return nbor;
+        }
+    }
+    return NULL;
+}
+/* Find nexthop entry in the route's nexthops hash */
+
+static struct ops_neighbor*
+neighbor_hash_lookup(uint32_t ip)
+{
+    struct ops_neighbor *nbor = NULL;
+
+    HMAP_FOR_EACH_WITH_HASH(nbor, node, hash_int(ip, 0),
+                            &neighbor_table) {
+        if (nbor->ip == ip) {
+            return nbor;
+        }
+    }
+    return NULL;
+}
 static int
 add_l3_host_entry(const struct ofproto *ofproto_, void *aux,
                   bool is_ipv6_addr, char *ip_addr,
@@ -1937,6 +2087,7 @@ add_l3_host_entry(const struct ofproto *ofproto_, void *aux,
     switch_handle_t nhop_handle = 0;
     switch_handle_t neigh_handle = 0;
     switch_nhop_key_t nhop_key;
+    struct ops_neighbor *nbor;
 
     VLOG_INFO("add_l3_host_entry: ip address %s", ip_addr);
 
@@ -2007,6 +2158,28 @@ add_l3_host_entry(const struct ofproto *ofproto_, void *aux,
         VLOG_DBG("add_l3_host_entry success");
     }
 
+    /* Cache neighbor entries for tunnel app */
+    nbor = xzalloc(sizeof(*nbor));
+
+    if(!is_ipv6_addr) {
+        if(!inet_pton(AF_INET, ip_addr, &nbor->ip)) {
+            VLOG_ERR("MHDBG err converting %s", ip_addr);
+            return 0;
+        }
+    } else {
+        /* TODO */
+    }
+    nbor->ip = ntohl(nbor->ip);
+    nbor->mac = xstrdup(next_hop_mac_addr);
+    nbor->nhop_handle = nhop_handle;
+    nbor->neighbor_handle = neigh_handle;
+
+    VLOG_INFO("MHDBG insert neighbor ip 0x%x, mac %s,"
+              " neibor handle 0x%x nhop handle 0x%x",
+              nbor->ip, nbor->mac, nbor->neighbor_handle,
+              nbor->nhop_handle );
+    hmap_insert(&neighbor_table, &nbor->node, hash_int(nbor->ip, 0));
+
     return 0;
 }
 
@@ -2020,6 +2193,8 @@ delete_l3_host_entry(const struct ofproto *ofproto_, void *aux,
     switch_ip_addr_t ip_address;
     int rc = 0;
     switch_status_t status = SWITCH_STATUS_SUCCESS;
+    struct ops_neighbor *nbor;
+    uint32_t ip_tmp;
 
     bundle = bundle_lookup(ofproto, aux);
     if (bundle == NULL) {
@@ -2071,7 +2246,27 @@ delete_l3_host_entry(const struct ofproto *ofproto_, void *aux,
     if (status != SWITCH_STATUS_SUCCESS) {
         VLOG_ERR("nhop delete 0x%x failed - %d", nhop_handle, status);
     }
+    /* Remove neighbor entry from cache table */
+    if(!is_ipv6_addr) {
+        if(!inet_pton(AF_INET, ip_addr, &ip_tmp)) {
+            VLOG_ERR("Error converting ip %s", ip_addr);
+            return 0;
+        }
+    } else {
+        /* TODO */
+    }
 
+    VLOG_INFO("MHDBG delete neighbor ip %d",ip_tmp);
+    nbor = neighbor_hash_lookup(ntohl(ip_tmp));
+    if(nbor) {
+        VLOG_INFO("MHDBG delete neighbor ip 0x%x, mac %s, handle 0x%x",
+                  nbor->ip, nbor->mac, nbor->neighbor_handle);
+        hmap_remove(&neighbor_table, &nbor->node);
+        if (nbor->mac) {
+            free(nbor->mac);
+        }
+        free(nbor);
+    }
     return 0;
 }
 
@@ -2098,15 +2293,18 @@ l3_nexthop_hash_insert(
         nh->nhop_handle = id_to_handle(
                              SWITCH_HANDLE_TYPE_NHOP,
                              of_nh->l3_egress_id);
+        VLOG_INFO("MHDBG NEXTHOP inserted resolved nhop_handle 0x%x, of_nh->l3_egress_id 0x%x",
+                    nh->nhop_handle, of_nh->l3_egress_id);
     } else {
         nh->nhop_handle = l3_route_nhop_glean_get();
+        VLOG_INFO("MHDBG NEXTHOP inserted Not resolved 0x%x", nh->nhop_handle);
     }
 
     hashstr = of_nh->id;
     hmap_insert(&ops_routep->nexthops, &nh->node, hash_string(hashstr, 0));
     ops_routep->n_nexthops++;
 
-    VLOG_DBG("Add NH %s, egress_id %d, for route %s",
+    VLOG_INFO("Add NH %s, egress_id 0x%x, for route %s",
               nh->id, nh->nhop_handle, ops_routep->prefix);
 }
 
@@ -2171,6 +2369,9 @@ l3_route_hash_lookup(
     l3_route_compute_hash(vrf_handle, of_routep->prefix, hashstr, sizeof(hashstr));
     HMAP_FOR_EACH_WITH_HASH(ops_routep, node, hash_string(hashstr, 0),
                             &l3_route_table) {
+        VLOG_INFO("Found a hashed route %s vrf 0x%lx vs route %s vrf 0x%lx",
+                    ops_routep->prefix, ops_routep->vrf_handle,
+				of_routep->prefix, vrf_handle);
         if ((strcmp(ops_routep->prefix, of_routep->prefix) == 0) &&
             (ops_routep->vrf_handle == vrf_handle)) {
             return ops_routep;
@@ -2224,7 +2425,7 @@ l3_route_hash_update(
     struct ofproto_route_nexthop *of_nh;
     switch_handle_t nhop_handle = 0;
     int i;
-
+    VLOG_INFO("l3_route_hash_update");
     for (i = 0; i < of_routep->n_nexthops; i++) {
         of_nh = &of_routep->nexthops[i];
         nh = l3_nexthop_hash_lookup(ops_routep, of_nh);
@@ -2239,8 +2440,10 @@ l3_route_hash_update(
                     nh->nhop_handle = id_to_handle(
                                        SWITCH_HANDLE_TYPE_NHOP,
                                        of_nh->l3_egress_id);
+                    VLOG_INFO("NEXTHOP*** inserted resolved 0x%x", nh->nhop_handle);
                 } else {
                     nh->nhop_handle = l3_route_nhop_glean_get();
+                    VLOG_INFO("NEXTHOP*** inserted no resolved 0x%x", nh->nhop_handle);
                 }
 
             }
@@ -2527,7 +2730,7 @@ l3_route_entry_update(
     int new_nexthops = 0;
     int total_nexthops = 0;
     int i = 0;
-
+    VLOG_INFO("l3_route_entry_update ");
     ovs_assert(of_routep && ops_routep);
 
     for (i = 0; i < of_routep->n_nexthops; i++) {
@@ -2877,6 +3080,144 @@ l3_route_action(const struct ofproto *ofproto,
     return rc;
 }
 
+static void print_neighbor_info(switch_handle_t nhop_handle)
+{
+    switch_handle_t neighbor_handle;
+
+    neighbor_handle = switch_api_neighbor_handle_get(nhop_handle);
+    if (neighbor_handle != SWITCH_API_INVALID_HANDLE) {
+        VLOG_INFO("neighbor hdl 0x%x",neighbor_handle);
+        switch_api_neighbor_print_entry(neighbor_handle);
+    } else {
+        VLOG_ERR("Failed to get valid neighbor for nh 0x%x", nhop_handle);
+    }
+}
+/* Get next hop egress id from routep */
+static bool
+nexthop_lookup(struct ops_route *routep, struct ops_nexthop * nexthop)
+{
+    struct ops_nexthop  *nh, *next;
+    if (!routep) {
+        VLOG_ERR("%s Invalid pointer",__func__);
+        return false;
+    }
+    HMAP_FOR_EACH_SAFE(nh, next, node, &routep->nexthops) {
+        /* Take the first nexthop */
+        if(nh && nh->id != NULL && nexthop) {
+            VLOG_INFO("Found nexthop id %s handle 0x%x",
+                    nh->id, nh->nhop_handle);
+            nexthop->id = nh->id;
+            nexthop->nhop_handle = nh->nhop_handle;
+            print_neighbor_info(nh->nhop_handle);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool
+nexthop_lookup_from_route(char *route_prefix, struct ops_nexthop * nh)
+{
+    struct   ofproto_route of_routep;
+    struct   ops_route * route;
+    of_routep.prefix = route_prefix;
+    struct sim_provider_node *ofproto = NULL;
+    VLOG_INFO("MHDBG Nexthop_lookup_from_route, prefix %s", of_routep.prefix);
+
+    HMAP_FOR_EACH (ofproto, all_sim_provider_node,
+                   &all_sim_provider_nodes) {
+        if(ofproto->vrf) {
+            route = l3_route_hash_lookup(ofproto->vrf_handle, &of_routep);
+            if(route){
+                VLOG_INFO("%s, number of nexthops %d", route->prefix,
+                          route->n_nexthops);
+                return nexthop_lookup(route, nh);
+            }
+        }
+    }
+    return false;
+}
+
+/* Find nexthop handle and nexthop id
+ * given dst IPv4 in netbyte order using
+ * LPM (Longest Prefix Match)
+ */
+static bool
+nexthop_lookup_from_dst_ip(uint32_t ip_dst, struct ops_nexthop * nh)
+{
+    uint32_t prefix, len;
+    char     ip_prefix[INET_ADDRSTRLEN];
+    int      plen;
+    for(plen = IPV4_BIT_LEN; plen>0; plen--) {
+        prefix = ip_dst & be32_prefix_mask(plen);
+        VLOG_INFO("nexthop_lookup_from_dst_ip, prefix 0x%x mask 0x%x",
+                   prefix, be32_prefix_mask(plen));
+        if(prefix) {
+            inet_ntop(AF_INET, &prefix, ip_prefix, INET_ADDRSTRLEN);
+            len = strlen(ip_prefix);
+            snprintf(&ip_prefix[len], INET_ADDRSTRLEN - len, "/%d",plen);
+            VLOG_INFO("prefix string %s", ip_prefix);
+            if(nexthop_lookup_from_route(ip_prefix, nh)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static struct ops_neighbor*
+get_nexthop(struct netdev *netdev)
+{
+    ovs_be32 ipv4;
+    int unit = 0;
+    struct ops_nexthop nhop;
+    struct ops_neighbor* nbor;
+
+    const struct netdev_tunnel_config *tnl_cfg;
+
+    tnl_cfg = netdev_get_tunnel_config(netdev);
+    if (!tnl_cfg) {
+        VLOG_ERR("%s Invalid tunnel config\n", __func__);
+        return NULL;
+    }
+    ipv4 = in6_addr_get_mapped_ipv4(&tnl_cfg->ipv6_dst);
+    if(!ipv4) {
+         // TODO: support IPV6
+         VLOG_ERR("Invalid destination IP\n");
+         return NULL;
+    }
+    /*
+     * When there is no GW in between
+     * return nbor information
+     */
+    VLOG_INFO("MHDBG search ip 0x%x",ntohl(ipv4));
+    nbor = neighbor_hash_lookup(ntohl(ipv4));
+    if(nbor != NULL) {
+        VLOG_INFO("MHDBG Got neighbor ip 0x%x mac %s,"
+                  " neighbor hndle  0x%x nhop hndle 0x%x",
+                  nbor->ip, nbor->mac, nbor->neighbor_handle,
+                  nbor->nhop_handle);
+
+        return nbor;
+    }
+    /*
+     * When there is a GW, search for nexthop handler
+     * From next hop handler, find the neighbor info
+     */
+    if(nexthop_lookup_from_dst_ip(ipv4, &nhop)) {
+        VLOG_DBG("MHDBG Found Nexthop");
+        /*
+         * From nexthop, get the neighbor info.
+         * Barefoot has internal get neighbor info from the nexthop
+         * handle but doesn't export this api yet.  Meanwhile,
+         * we have implemented the neighbor cache and can use that instead.
+         */
+        return neighbor_lookup_from_nexthop(nhop.nhop_handle);
+    } else {
+        VLOG_INFO("MHDBG Can't find nexthop");
+    }
+    return NULL;
+}
 const struct ofproto_class ofproto_sim_provider_class = {
     init,
     enumerate_types,
