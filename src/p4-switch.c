@@ -122,12 +122,17 @@ p4_switch_api_logger(switch_api_log_level_t level, char *fmt, ...)
     return 1;
 }
 
+void temp_mac_learn_callback(switch_api_mac_entry_t *mac_entry){
+    VLOG_ERR("Avinash mac:%02X:%02X:%02X:%02X:%02X:%02X", mac_entry->mac.mac_addr[0], mac_entry->mac.mac_addr[1], mac_entry->mac.mac_addr[2], mac_entry->mac.mac_addr[3], mac_entry->mac.mac_addr[4], mac_entry->mac.mac_addr[5]);
+}
+
 void
 p4_switch_init ()
 {
     /* P4 simulator supports only a single device with N ports,
      * always pass device=0 to all apis
      */
+    //set_logging("SYSLOG:DBG");
     emulns_fd = -1;
     swns_fd = -1;
     /* model runs in emulns while plugin runs in swns.
@@ -154,6 +159,10 @@ p4_switch_init ()
     /* register logger function to send switchapi logs to vlog infra */
     switch_api_log_function_set(p4_switch_api_logger);
     start_switch_api_packet_driver();
+    switch_status_t temp = switch_api_mac_register_learning_callback(temp_mac_learn_callback);
+    if(temp != SWITCH_STATUS_SUCCESS){
+        VLOG_ERR("Disaster");
+    }
     /* attach to swns for the rest of the processing */
     if (swns_fd >= 0) {
         if (setns(swns_fd, 0) < 0) {

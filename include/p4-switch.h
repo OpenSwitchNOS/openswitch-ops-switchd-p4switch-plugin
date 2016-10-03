@@ -22,6 +22,7 @@
 #include "switchapi/switch_hostif.h"
 #include "switchapi/switch_interface.h"
 #include "switchapi/switch_vlan.h"
+#include "switchapi/switch_l2.h"
 #include "switchapi/switch_l3.h"
 #include "switchapi/switch_hostif.h"
 #include "switchapi/switch_vrf.h"
