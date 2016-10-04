@@ -38,6 +38,9 @@ extern void p4_ofproto_init(void);
 void
 init(void)
 {
+    /* Register asic plugins for various featues*/
+    register_classifier_plugins();
+
     p4_switch_init();
 }
 
