@@ -203,4 +203,15 @@ enum { N_TABLES = 1 };
 enum { TBL_INTERNAL = N_TABLES - 1 };   /* Used for internal hidden rules. */
 
 extern const struct ofproto_class ofproto_sim_provider_class;
+
+/**
+ * Register asic plugins for various features such as ACL
+ */
+int register_classifier_plugins(void);
+
+extern struct sim_provider_node *
+sim_provider_node_cast(const struct ofproto *ofproto);
+
+extern struct ofbundle *
+bundle_lookup(const struct sim_provider_node *ofproto, void *aux);
 #endif /* OFPROTO_P4_SIM_PROVIDER_H */

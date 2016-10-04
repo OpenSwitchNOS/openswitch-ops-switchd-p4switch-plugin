@@ -34,8 +34,9 @@
 #include "openvswitch/vlog.h"
 #include "ofproto-p4-sim-provider.h"
 #include "vswitch-idl.h"
-
+#include "ops-classifier.h"
 #include "netdev-p4-sim.h"
+
 #include <netinet/ether.h>
 #include <assert.h>
 
@@ -84,7 +85,7 @@ sim_provider_bundle_ofport_cast(const struct ovs_list *lnode)
         CONTAINER_OF(lnode, struct sim_provider_ofport, bundle_node) : NULL;
 }
 
-static inline struct sim_provider_node *
+struct sim_provider_node *
 sim_provider_node_cast(const struct ofproto *ofproto)
 {
     ovs_assert(ofproto->ofproto_class == &ofproto_sim_provider_class);
@@ -427,7 +428,7 @@ bfd_status_changed(struct ofport *ofport_ OVS_UNUSED)
     return false;
 }
 
-static struct ofbundle *
+struct ofbundle *
 bundle_lookup(const struct sim_provider_node *ofproto, void *aux)
 {
     struct ofbundle *bundle;
@@ -852,6 +853,7 @@ p4_switch_interface_create (struct ofbundle *bundle)
     }
 
     bundle->if_handle = switch_api_interface_create(device, &i_info);
+    VLOG_INFO("ACL_DEV: bundle name %s, interface handle %d", bundle->name, bundle->if_handle);
     if (bundle->if_handle == SWITCH_API_INVALID_HANDLE) {
         VLOG_ERR("switch_api_interface_create - failed");
     }
@@ -2875,6 +2877,13 @@ l3_route_action(const struct ofproto *ofproto,
     }
 
     return rc;
+}
+
+int
+register_classifier_plugins(void)
+{
+    /* Register classifier plugin extension */
+     return(register_ops_cls_plugin());
 }
 
 const struct ofproto_class ofproto_sim_provider_class = {
