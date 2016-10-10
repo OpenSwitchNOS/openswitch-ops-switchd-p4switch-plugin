@@ -232,11 +232,54 @@ netdev_sim_rmac_handle_deallocate(struct netdev *netdev_)
     return 0;
 }
 
+/*
+ * Use SIOCSIFHWADDR to change MAC address of intf.
+ * Linux tun tap interfaces does not seem to need
+ * an admin down before MAC change.
+ */
+static int
+netdev_sim_set_macaddr(char *intf, char *macaddr)
+{
+    struct ifreq ifr;
+    int sock;
+
+    snprintf(ifr.ifr_name, IFNAMSIZ, "%s", intf);
+    ifr.ifr_hwaddr.sa_family = ARPHRD_ETHER;
+    if (sscanf(macaddr, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+               &ifr.ifr_hwaddr.sa_data[0],
+               &ifr.ifr_hwaddr.sa_data[1],
+               &ifr.ifr_hwaddr.sa_data[2],
+               &ifr.ifr_hwaddr.sa_data[3],
+               &ifr.ifr_hwaddr.sa_data[4],
+               &ifr.ifr_hwaddr.sa_data[5]) != ETH_ADDR_LEN) {
+        VLOG_ERR("netdev_set_macaddr (%s) sscanf failed for (%s)\n",
+                  intf, macaddr);
+        return -1;
+    }
+    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        VLOG_ERR("netdev_set_macaddr (%s) MAC (%s) socket failed '%s'\n",
+                  intf, macaddr, strerror(errno));
+        return -1;
+    }
+
+    if (ioctl(sock, SIOCSIFHWADDR, &ifr) < 0) {
+        VLOG_ERR("netdev_set_macaddr (%s) MAC (%s) ioctl failed '%s'\n",
+                  intf, macaddr, strerror(errno));
+        close(sock);
+        return -1;
+    }
+
+    close(sock);
+    return 0;
+}
+
+/* TODO: Error handling */
 static int
 netdev_sim_internal_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
 {
     struct netdev_sim *netdev = netdev_sim_cast(netdev_);
     bool bridge = smap_get(args, INTERFACE_HW_INTF_INFO_MAP_BRIDGE);
+    const char *mac_addr = smap_get(args, INTERFACE_HW_INTF_INFO_MAP_MAC_ADDR);
     char cmd[MAX_CMD_BUF];
 
     ovs_mutex_lock(&netdev->mutex);
@@ -244,12 +287,6 @@ netdev_sim_internal_set_hw_intf_info(struct netdev *netdev_, const struct smap *
     VLOG_INFO("internal_set_hw_intf_info for %s", netdev->linux_intf_name);
 
     if (bridge) {
-        sprintf(cmd, "%s /sbin/ip tuntap add dev %s mode tap",
-                SWNS_EXEC, netdev->linux_intf_name);
-
-        if (system(cmd) != 0) {
-            VLOG_ERR("NETDEV-SIM | system command failure cmd=%s", cmd);
-        }
 
         if (netdev->hostif_handle == SWITCH_API_INVALID_HANDLE) {
             switch_hostif_t     hostif;
@@ -264,25 +301,9 @@ netdev_sim_internal_set_hw_intf_info(struct netdev *netdev_, const struct smap *
 
         if (netdev->rmac_handle == SWITCH_API_INVALID_HANDLE) {
 
-            sprintf(cmd, "%s /sbin/ip link set dev %s down",
-                    SWNS_EXEC, netdev->linux_intf_name);
-            if (system(cmd) != 0) {
-                VLOG_ERR("NETDEV-SIM | system command failure cmd=%s", cmd);
-            }
-
-            sprintf(cmd, "%s /sbin/ip link set %s address %x:%x:%x:%x:%x:%x",
-                    SWNS_EXEC, netdev->up.name,
-                    netdev->hwaddr[0], netdev->hwaddr[1],
-                    netdev->hwaddr[2], netdev->hwaddr[3],
-                    netdev->hwaddr[4], netdev->hwaddr[5]);
-            if (system(cmd) != 0) {
-                VLOG_ERR("NETDEV-SIM | system command failure cmd=%s", cmd);
-            }
-
-            sprintf(cmd, "%s /sbin/ip link set dev %s up",
-                    SWNS_EXEC, netdev->linux_intf_name);
-            if (system(cmd) != 0) {
-                VLOG_ERR("NETDEV-SIM | system command failure cmd=%s", cmd);
+            if(mac_addr != NULL) {
+                strncpy(netdev->hw_addr_str, mac_addr, sizeof(netdev->hw_addr_str));
+                netdev_sim_set_macaddr(netdev->up.name, netdev->hw_addr_str);
             }
 
             netdev_sim_rmac_handle_allocate(netdev_);
@@ -315,6 +336,7 @@ netdev_sim_internal_set_hw_intf_info(struct netdev *netdev_, const struct smap *
     return 0;
 }
 
+/* TODO: Error handling */
 static int
 netdev_sim_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
 {
@@ -350,13 +372,6 @@ netdev_sim_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
                 }
             }
 
-            /* create a tap interface */
-            sprintf(cmd, "%s /sbin/ip tuntap add dev %s mode tap",
-                    SWNS_EXEC, netdev->linux_intf_name);
-
-            if (system(cmd) != 0) {
-                VLOG_ERR("NETDEV-SIM | system command failure cmd=%s", cmd);
-            }
             if (netdev->hostif_handle == SWITCH_API_INVALID_HANDLE) {
                 switch_hostif_t     hostif;
                 switch_status_t     status = SWITCH_STATUS_SUCCESS;
@@ -421,28 +436,11 @@ netdev_sim_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
     if(max_speed)
         netdev->hw_info_link_speed = atoi(max_speed);
 
-    sprintf(cmd, "%s /sbin/ip link set dev %s down",
-            SWNS_EXEC, netdev->linux_intf_name);
-    if (system(cmd) != 0) {
-        VLOG_ERR("NETDEV-SIM | system command failure cmd=%s", cmd);
-    }
-
     if(mac_addr != NULL) {
         strncpy(netdev->hw_addr_str, mac_addr, sizeof(netdev->hw_addr_str));
-
-        sprintf(cmd, "%s /sbin/ip link set %s address %s",
-                SWNS_EXEC, netdev->up.name, netdev->hw_addr_str);
-        if (system(cmd) != 0) {
-            VLOG_ERR("NETDEV-SIM | system command failure cmd=%s", cmd);
-        }
+        netdev_sim_set_macaddr(netdev->up.name, netdev->hw_addr_str);
     } else {
         VLOG_ERR("Invalid mac address %s", mac_addr);
-    }
-
-    sprintf(cmd, "%s /sbin/ip link set dev %s up",
-            SWNS_EXEC, netdev->linux_intf_name);
-    if (system(cmd) != 0) {
-        VLOG_ERR("NETDEV-SIM | system command failure cmd=%s", cmd);
     }
 
     ovs_mutex_unlock(&netdev->mutex);
