@@ -21,6 +21,10 @@
 #include "netdev-p4-sim.h"
 #include "ofproto-p4-sim-provider.h"
 #include "p4-switch.h"
+#include "asic-plugin.h"
+#include "plugin-extensions.h"
+#include "ops-logical-switch.h"
+#include "ops_vport.h"
 
 #define init libovs_p4_sim_plugin_LTX_init
 #define run libovs_p4_sim_plugin_LTX_run
@@ -35,10 +39,29 @@ VLOG_DEFINE_THIS_MODULE(P4_sim_plugin);
 
 extern void p4_ofproto_init(void);
 
+struct asic_plugin_interface p4_interface ={
+    /* The new functions that need to be exported, can be declared here*/
+    .set_logical_switch = &ops_set_logical_switch,
+    .vport_bind_all_ports_on_vlan = &ops_vport_bind_all_ports_on_vlan,
+    .vport_unbind_all_ports_on_vlan = &ops_vport_unbind_all_ports_on_vlan,
+    .vport_bind_port_on_vlan = &ops_vport_bind_port_on_vlan,
+    .vport_unbind_port_on_vlan = &ops_vport_unbind_port_on_vlan,
+};
+
 void
 init(void)
 {
+    int retval;
+    struct plugin_extension_interface p4_extension;
+
     p4_switch_init();
+    VLOG_INFO("P4 Switch initialization completed");
+    p4_extension.plugin_name = P4_ASIC_PLUGIN_INTERFACE_NAME;
+    p4_extension.major = ASIC_PLUGIN_INTERFACE_MAJOR;
+    p4_extension.minor = ASIC_PLUGIN_INTERFACE_MINOR;
+    p4_extension.plugin_interface = (void *)&p4_interface;
+    register_plugin_extension(&p4_extension);
+    VLOG_INFO("The %s asic plugin interface was registered", P4_ASIC_PLUGIN_INTERFACE_NAME);
 }
 
 void
@@ -54,6 +77,7 @@ wait(void)
 void
 destroy(void)
 {
+    unregister_plugin_extension(P4_ASIC_PLUGIN_INTERFACE_NAME);
 }
 
 void

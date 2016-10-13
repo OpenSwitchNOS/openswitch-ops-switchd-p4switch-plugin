@@ -27,6 +27,14 @@
                              (!strncmp((s1), (s2), strlen((s2)))))
 
 #define MAX_CMD_BUF 1024
+
+#define GENEVE_DST_PORT 6081
+#define VXLAN_DST_PORT 4789
+#define LISP_DST_PORT 4341
+#define STT_DST_PORT 7471
+
+#define DEFAULT_TTL 64
+
 /* SIM provider API. */
 void netdev_sim_register(void);
 extern int netdev_get_device_port_handle(struct netdev *netdev_,
