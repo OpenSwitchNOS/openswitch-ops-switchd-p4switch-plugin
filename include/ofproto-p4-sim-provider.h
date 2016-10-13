@@ -23,6 +23,7 @@
 
 #include "ofproto/ofproto-provider.h"
 #include "p4-switch.h"
+#include "types.h"
 
 #define OPS_ROUTE_HASH_MAXSIZE 64
 #define MAX_NEXTHOPS_PER_ROUTE 16
@@ -45,6 +46,8 @@ struct ofp4vlan {
     uint32_t vid;
     int32_t ref_count;
     switch_handle_t vlan_handle;    /* P4 vlan handle */
+    /* Bitmaps of interfaces configured for this VLAN. */
+    p4_pbmp_t cfg_access_ports[MAX_SWITCH_UNITS];
 };
 
 struct ofbundle {
@@ -198,9 +201,20 @@ struct ops_nexthop {
     switch_handle_t nhop_handle;
 };
 
+struct ops_neighbor {
+    struct hmap_node node;
+    uint32_t ip; //FIXME to take care of ip6
+    char * mac;
+    switch_handle_t neighbor_handle;
+    switch_handle_t nhop_handle;
+};
 /* Not used yet by P4 plugin. */
 enum { N_TABLES = 1 };
 enum { TBL_INTERNAL = N_TABLES - 1 };   /* Used for internal hidden rules. */
 
 extern const struct ofproto_class ofproto_sim_provider_class;
+
+switch_handle_t
+p4_get_intf_handle_from_ip(switch_ip_addr_t *ip);
+
 #endif /* OFPROTO_P4_SIM_PROVIDER_H */
