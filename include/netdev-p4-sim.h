@@ -21,12 +21,23 @@
 
 #include "netdev-provider.h"
 #include "p4-switch.h"
+#include "switchapi/switch_handle.h"
 
 #define STR_EQ(s1, s2)      ((s1 != NULL) && (s2 != NULL) && \
                              (strlen((s1)) == strlen((s2))) && \
                              (!strncmp((s1), (s2), strlen((s2)))))
 
 #define MAX_CMD_BUF 1024
+
+struct netdev_tunnel_config;
+
+#define UDP_PORT_MIN 32768
+#define UDP_PORT_MAX 61000
+
+#define P4_HANDLE_IS_VALID(_h)  ((_h) != SWITCH_API_INVALID_HANDLE)
+
+#define DEFAULT_P4_DEVICE 0
+
 /* SIM provider API. */
 void netdev_sim_register(void);
 extern int netdev_get_device_port_handle(struct netdev *netdev_,
