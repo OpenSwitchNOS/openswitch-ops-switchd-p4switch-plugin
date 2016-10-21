@@ -1488,7 +1488,7 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args)
     }
     else {
         dev->state = TNL_UNDEFINED;
-        return EINVAL;
+        return 0;
     }
     VLOG_DBG("%s: Setting tunnel configuration is done.",__func__);
     return 0;

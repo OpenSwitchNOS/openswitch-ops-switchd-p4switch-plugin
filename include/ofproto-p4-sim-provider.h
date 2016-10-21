@@ -202,11 +202,11 @@ struct ops_nexthop {
 };
 
 struct ops_neighbor {
-    struct hmap_node node;
-    uint32_t ip; //FIXME to take care of ip6
-    char * mac;
-    switch_handle_t neighbor_handle;
-    switch_handle_t nhop_handle;
+    struct hmap_node    node;
+    uint32_t            ip; //FIXME to take care of ip6
+    char                *mac;
+    switch_handle_t     neighbor_handle;
+    switch_handle_t     nhop_handle;
 };
 /* Not used yet by P4 plugin. */
 enum { N_TABLES = 1 };
