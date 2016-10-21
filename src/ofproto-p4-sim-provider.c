@@ -649,6 +649,13 @@ disable_port_in_iptables(const char *port_name)
 }
 
 static int
+p4_vport_delete(struct ofbundle *bundle, struct netdev *netdev)
+{
+    //p4_vport_unbind_all(netdev);
+    return p4_vport_delete_tunnel(netdev);
+}
+
+static int
 p4_vport_create(struct ofbundle *bundle, struct netdev *netdev)
 {
     struct ops_neighbor*    nbor = NULL;
@@ -700,6 +707,12 @@ bundle_del_port(struct sim_provider_ofport *port)
 
     list_remove(&port->bundle_node);
     port->bundle = NULL;
+
+    if(!strcmp(netdev_get_type(port->up.netdev),
+        OVSREC_INTERFACE_TYPE_VXLAN)) {
+        VLOG_DBG("%s name %s", __func__, port->bundle->name);
+        p4_vport_delete( port->bundle, port->up.netdev);
+    }
 
     if (bundle && bundle->is_lag) {
         p4_lag_port_update(bundle->port_lag_handle, port, false/*add*/);
@@ -2120,6 +2133,7 @@ neighbor_hash_lookup(uint32_t ip)
     }
     return NULL;
 }
+
 static int
 add_l3_host_entry(const struct ofproto *ofproto_, void *aux,
                   bool is_ipv6_addr, char *ip_addr,

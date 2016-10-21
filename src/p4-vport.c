@@ -21,10 +21,6 @@
 
 VLOG_DEFINE_THIS_MODULE(P4_vport);
 
-/**** Logical Network for terminal diag ****/
-switch_handle_t                    p4_ln_handle;
-/*******************************************/
-
 static  uint16_t tnl_udp_port = UDP_PORT_MIN;
 
 
@@ -32,6 +28,7 @@ static uint32_t get_prefix_len(const char * route_prefix);
 static void ip_to_prefix(uint32_t ip, uint32_t prefix_len, char *ip_prefix);
 
 struct hmap tunnel_hmap = HMAP_INITIALIZER(&tunnel_hmap);
+struct hmap logical_nw_hmap = HMAP_INITIALIZER(&logical_nw_hmap);
 
 /* caller has to validate *dev
  * ip_addr is hostbyte order
@@ -92,6 +89,65 @@ tnl_remove(struct netdev *netdev)
         free(node);
     }
 }
+
+/* caller has to validate *dev
+ * ip_addr is hostbyte order
+ */
+static logical_nw_node *
+logical_nw_insert(uint32_t vni, switch_handle_t ln_handle)
+{
+    logical_nw_node  *node = NULL;
+    node = xmalloc(sizeof *node);
+    if (node == NULL) {
+        VLOG_ERR("%s:xmalloc failed",__func__);
+        return NULL;
+    }
+
+    hmap_insert(&logical_nw_hmap, &node->hmap_t_node, hash_int(vni, 0));
+    node->logical_nw_handle = ln_handle;
+    node->vni = vni;
+    VLOG_INFO("Insert hashmap logical nw id : %u", vni);
+    return node;
+}
+
+static logical_nw_node *
+logical_nw_lookup_vni(uint32_t vni)
+{
+    logical_nw_node *node;
+    uint32_t hash = hash_int(vni, 0);
+    HMAP_FOR_EACH_WITH_HASH(node, hmap_t_node, hash, &logical_nw_hmap) {
+        if (node->vni == vni) {
+            return node;
+        }
+    }
+    VLOG_ERR("%s:logical_network lookup failed",__func__);
+    return NULL;
+}
+
+static switch_handle_t
+get_logical_nw_handle(uint32_t vni)
+{
+    logical_nw_node *node = NULL;
+
+    node = logical_nw_lookup_vni(vni);
+    if (!node){
+        return node->logical_nw_handle;
+    }
+    return SWITCH_API_INVALID_HANDLE;
+}
+
+/* caller has to validate *netdev */
+static void
+logical_nw_remove(uint32_t vni)
+{
+    logical_nw_node *node;
+    node = logical_nw_lookup_vni(vni);
+    if(node) {
+        hmap_remove(&logical_nw_hmap, &node->hmap_t_node);
+        free(node);
+    }
+}
+
 static int
 get_src_udp(void)
 {
@@ -144,6 +200,10 @@ p4_vport_create_tunnel(struct ofbundle *bundle, struct netdev *netdev)
     struct sim_provider_node    *ofproto = bundle->ofproto;
     const char                  *devname = NULL;
     struct sim_provider_ofport *port = NULL;
+    uint32_t                    vni = 0;
+    switch_status_t             status = SWITCH_STATUS_FAILURE;
+    switch_handle_t             p4_ln_handle = SWITCH_API_INVALID_HANDLE;
+    tunnel_node                 *tnl_node = NULL;
 
     VLOG_DBG("bundle name = %s, if_handle = %d", bundle->name, bundle->if_handle);
     tnl_cfg = netdev_get_tunnel_config(netdev);
@@ -187,13 +247,13 @@ p4_vport_create_tunnel(struct ofbundle *bundle, struct netdev *netdev)
     }
     tunnel_info.u.ip_encap.ttl = tnl_cfg->ttl;
 
-    tunnel_info.u.ip_encap.proto = P4_SWITCH_API_VXLAN_PROTOCOL; // VxLAN protocol
+    tunnel_info.u.ip_encap.proto = P4_SWITCH_API_VXLAN_PROTOCOL;
     tunnel_info.u.ip_encap.u.udp.src_port = get_src_udp();
     tunnel_info.u.ip_encap.u.udp.dst_port = ntohs(tnl_cfg->dst_port);
 
     tunnel_info.encap_info.encap_type = SWITCH_API_ENCAP_TYPE_VXLAN;
-    VLOG_DBG("setting VNI = 0x%x, %d", get_vni(netdev), get_vni(netdev));
-    tunnel_info.encap_info.u.vxlan_info.vnid = get_vni(netdev);
+    vni = get_vni(netdev);
+    tunnel_info.encap_info.u.vxlan_info.vnid = vni;
 
     tunnel_info.out_if = p4_get_intf_handle_from_ip(&(tunnel_info.u.ip_encap.src_ip));
     tunnel_info.flags.core_intf = true;
@@ -207,6 +267,17 @@ p4_vport_create_tunnel(struct ofbundle *bundle, struct netdev *netdev)
         /* switch_api_vlan_stats_enable(device, handle); */
         VLOG_INFO("Created VxLAN Tunnel interface, handle = %lx", bundle->if_handle);
         netdev_set_tunnel_iface_handle(netdev, bundle->if_handle);
+        p4_ln_handle = get_logical_nw_handle(vni);
+        status = switch_api_logical_network_member_add(DEFAULT_P4_DEVICE,
+                                                       p4_ln_handle, bundle->if_handle);
+        if (status != SWITCH_STATUS_SUCCESS) {
+            VLOG_ERR("Unable to add tunnel interface member to logical network");
+            return 0;
+        }
+
+        netdev_set_logical_nw_handle(netdev, p4_ln_handle);
+        tnl_node = tnl_lookup_netdev(netdev);
+        tnl_node->tunnel_handle = bundle->if_handle;
         return bundle->if_handle;
     }
 
@@ -218,7 +289,7 @@ p4_vport_tunnel_add_neighbor(struct ofbundle *bundle, struct netdev *netdev,
                               struct ops_neighbor *nbor)
 {
     struct sim_provider_node    *ofproto = bundle->ofproto;
-    switch_handle_t             tunnel_handle = netdev_get_tunnel_iface_handle(netdev);
+    switch_handle_t             tunnel_handle = SWITCH_API_INVALID_HANDLE;
     switch_handle_t             neigh1_handle = 0;
     switch_handle_t             neigh2_handle = 0;
     switch_api_neighbor_t       neighbor1;
@@ -226,17 +297,9 @@ p4_vport_tunnel_add_neighbor(struct ofbundle *bundle, struct netdev *netdev,
     switch_handle_t             nhop_handle = 0;
     struct ether_addr *         mac_addr = NULL;
     switch_nhop_key_t           nexthop_key;
-    switch_status_t             status;
+    tunnel_node                 *tnl_node = NULL;
 
-    //logical_net = get_logical_network(tunnel_info.encap_info.u.vxlan_info.vnid);
-    status = switch_api_logical_network_member_add(DEFAULT_P4_DEVICE, p4_ln_handle, tunnel_handle);
-    if (status != SWITCH_STATUS_SUCCESS) {
-        VLOG_ERR("Unable to add tunnel interface member to logical network");
-        return 0;
-    }
-
-    netdev_set_logical_nw_handle(netdev, p4_ln_handle);
-
+    tunnel_handle = netdev_get_tunnel_iface_handle(netdev);
     memset(&nexthop_key, 0x0, sizeof(switch_nhop_key_t));
     nexthop_key.intf_handle = tunnel_handle;
     nexthop_key.ip_addr_valid = false;
@@ -274,18 +337,45 @@ p4_vport_tunnel_add_neighbor(struct ofbundle *bundle, struct netdev *netdev,
     neigh2_handle = switch_api_neighbor_entry_add(DEFAULT_P4_DEVICE, &neighbor2);
     VLOG_DBG("neigh 2 handle %lx", neigh2_handle);
 
+    tnl_node = tnl_lookup_netdev(netdev);
+    tnl_node->neigh1_handle = neigh1_handle;
+    tnl_node->neigh2_handle = neigh2_handle;
+    tnl_node->nhop_handle = nhop_handle;
     return 0;
 }
 
+int
+p4_vport_delete_tunnel(struct ofbundle *bundle, struct netdev *netdev)
+{
+    tunnel_node *tnl_node = NULL;
+
+    tnl_node = tnl_lookup_netdev(netdev);
+    if (!tnl_node) {
+        VLOG_INFO("%s Found tunnel node", __func__);
+        VLOG_INFO("%s removing neigh 1", __func__);
+        switch_api_neighbor_entry_remove(DEFAULT_P4_DEVICE, tnl_node->neigh1_handle);
+        VLOG_INFO("%s removing neigh 2", __func__);
+        switch_api_neighbor_entry_remove(DEFAULT_P4_DEVICE, tnl_node->neigh2_handle);
+        VLOG_INFO("%s deleting nexthop", __func__);
+        switch_api_nhop_delete(DEFAULT_P4_DEVICE, tnl_node->nhop_handle);
+        VLOG_INFO("%s removing tunnel from logical network", __func__);
+        //switch_api_logical_network_member_remove(DEFAULT_P4_DEVICE, tnl_node->tunnel_handle);
+        VLOG_INFO("%s deleting tunnel interface", __func__);
+        switch_api_tunnel_interface_delete(DEFAULT_P4_DEVICE, tnl_node->tunnel_handle);
+    }
+    VLOG_INFO("%s completed tunnel delete", __func__);
+    return 0;
+}
 
 int
 p4_vport_lsw_create(int hw_unit, uint32_t vni)
 {
     int rc;
-    switch_logical_network_t          *ln_info = NULL;
-    switch_vrf_info_t                 *vrf_info = NULL;
-    struct hmap_node                  *ln_node = NULL;
-    switch_logical_network_t           p4_ln_info;
+    switch_logical_network_t    *ln_info = NULL;
+    switch_vrf_info_t           *vrf_info = NULL;
+    switch_logical_network_t    p4_ln_info;
+    switch_handle_t             p4_ln_handle = SWITCH_API_INVALID_HANDLE;
+    logical_nw_node             *ln_node = NULL;
 
     ln_info = &p4_ln_info;
     memset(ln_info, 0, sizeof(switch_logical_network_t));
@@ -303,6 +393,9 @@ p4_vport_lsw_create(int hw_unit, uint32_t vni)
 
     p4_ln_handle = switch_api_logical_network_create(hw_unit, ln_info);
     if (p4_ln_handle != SWITCH_API_INVALID_HANDLE) {
+        ln_node = logical_nw_insert(vni, p4_ln_handle);
+        list_init(&ln_node->access_ports);
+        list_init(&ln_node->network_ports);
         return p4_ln_handle;
     }
 
@@ -409,13 +502,15 @@ p4_vport_bind_access_port(int hw_unit, p4_pbmp_t pbm, int vni, int vlan)
     switch_vlan_t               vlan_id = 0;
     struct netdev               *netdev = NULL;
     int                         aport = 0;
-    switch_status_t             status = -1;
-
+    switch_status_t             status = SWITCH_STATUS_FAILURE;
+    switch_handle_t             p4_ln_handle = SWITCH_API_INVALID_HANDLE;
+    logical_nw_node             *ln_node = NULL;
 
     if(!VALID_TUNNEL_KEY(vni)) {
         VLOG_ERR("Invalid vni %d, ", vni);
         return EINVAL;
     }
+
     P4_PBMP_ITER (pbm, aport) {
         access_handle = p4_get_intf_handle_and_remove_vlan(aport);
         if (!P4_HANDLE_IS_VALID(access_handle)) {
@@ -423,11 +518,14 @@ p4_vport_bind_access_port(int hw_unit, p4_pbmp_t pbm, int vni, int vlan)
             continue;
         }
 
+        ln_node = logical_nw_lookup_vni(vni);
+        p4_ln_handle = ln_node->logical_nw_handle;
         status = switch_api_logical_network_member_add(hw_unit, p4_ln_handle, access_handle);
         if (status != SWITCH_STATUS_SUCCESS) {
             VLOG_ERR("Unable to add access interface %d member to logical network", aport);
-            return 0;
+            return -1;
         }
+        list_push_back(&ln_node->access_ports, &access_handle);
     }
     return 0;
 }
