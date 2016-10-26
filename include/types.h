@@ -22,6 +22,7 @@ _shr_popcount(unsigned int n)
 
 #define P4_SWITCH_API_DEFAULT_IP_PREFIX_LEN     32
 #define P4_SWITCH_API_VXLAN_PROTOCOL            17
+#define P4_SWITCH_API_GRE_PROTOCOL              47
 #define P4_SWITCH_API_AGE_INTERVAL              1800
 
 #define _SHR_PBMP_PORT_MAX      32

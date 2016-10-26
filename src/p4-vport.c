@@ -92,6 +92,7 @@ tnl_remove(struct netdev *netdev)
         free(node);
     }
 }
+
 static int
 get_src_udp(void)
 {
@@ -112,6 +113,236 @@ get_vni(struct netdev *netdev)
     return -1;
 }
 
+/*
+ *  Input = GRE Tunnel configuration used to create the tunnel.
+ *  Output = Displays the Tunnel configuration.
+ */
+static void
+print_gre_tunnel_info(switch_tunnel_info_t *tunnel_info)
+{
+    VLOG_DBG("ENCP_MODE = %d", tunnel_info->encap_mode);
+    VLOG_DBG("SRC IP = %lx", tunnel_info->u.ip_encap.src_ip.ip.v4addr);
+    VLOG_DBG("DST IP = %lx", tunnel_info->u.ip_encap.dst_ip.ip.v4addr);
+    VLOG_DBG("VRF Handle = %lx", tunnel_info->u.ip_encap.vrf_handle);
+    VLOG_DBG("TTL = %d", tunnel_info->u.ip_encap.ttl);
+    VLOG_DBG("proto = %d", tunnel_info->u.ip_encap.proto);
+    VLOG_DBG("ENCAP type = %d", tunnel_info->encap_info.encap_type);
+    VLOG_DBG("Out Inf = %lx", tunnel_info->out_if);
+    VLOG_DBG("Core Intf = %d", tunnel_info->flags.core_intf);
+    VLOG_DBG("Flood Enabled = %d", tunnel_info->flags.flood_enabled);
+}
+
+/*
+ *  Input = GRE tunnel configuration information ( bundle, netdev)
+ *  Output = Interface handle of the GRE tunnel created.
+ *  This function creates the P4 gre tunnel interface, updates the HASH table
+ *  and returns the interface handle of the tunnel created.
+ */
+switch_handle_t
+p4_vport_create_gre_tunnel(struct ofbundle *bundle, struct netdev *netdev)
+{
+    int                         unit, rc = 0;
+    const struct netdev_tunnel_config *tnl_cfg;
+    switch_tunnel_info_t        tunnel_info;
+    switch_ip_encap_t           encap_info;
+    switch_ip_addr_t            dst_ip, src_ip;
+    ovs_be32                    ipv4;
+    switch_api_interface_info_t i_info;
+    switch_api_interface_info_t *access_intf_info;
+    struct sim_provider_node    *ofproto = bundle->ofproto;
+    const char                  *devname = NULL;
+    struct sim_provider_ofport  *port = NULL;
+    tunnel_node                 *tnl_node = NULL;
+
+    VLOG_DBG("bundle name = %s, if_handle = %d", bundle->name, bundle->if_handle);
+    tnl_cfg = netdev_get_tunnel_config(netdev);
+
+    ovs_assert(!P4_HANDLE_IS_VALID(bundle->if_handle));
+    memset(&i_info, 0, sizeof(switch_api_interface_info_t));
+
+    memset(&tunnel_info, 0, sizeof(switch_tunnel_info_t));
+    tunnel_info.encap_mode = SWITCH_API_TUNNEL_ENCAP_MODE_IP;
+
+
+    /* Update source IP of the tunnel */
+    ipv4 =  in6_addr_get_mapped_ipv4(&tnl_cfg->ipv6_src);
+
+    encap_info.src_ip.type = SWITCH_API_IP_ADDR_V4;
+    encap_info.src_ip.ip.v4addr = ntohl(ipv4);
+    encap_info.src_ip.prefix_len = P4_SWITCH_API_DEFAULT_IP_PREFIX_LEN;
+
+    /* Update destination IP of the tunnel */
+    ipv4 =  in6_addr_get_mapped_ipv4(&tnl_cfg->ipv6_dst);
+
+    encap_info.dst_ip.type = SWITCH_API_IP_ADDR_V4;
+    encap_info.dst_ip.ip.v4addr = ntohl(ipv4);
+    encap_info.dst_ip.prefix_len = P4_SWITCH_API_DEFAULT_IP_PREFIX_LEN;
+
+    /* if no VRF present then including tunnel as a part of default VRF */
+    if(ofproto->vrf_handle == 0 && switch_api_default_vrf_internal() != 0) {
+        encap_info.vrf_handle = switch_api_default_vrf_internal();
+    }
+    else {
+        encap_info.vrf_handle = ofproto->vrf_handle;
+    }
+    encap_info.ttl = tnl_cfg->ttl;
+
+    tunnel_info.u.ip_encap.proto = P4_SWITCH_API_GRE_PROTOCOL;
+    tunnel_info.u.ip_encap = encap_info;
+    tunnel_info.encap_info.encap_type = SWITCH_API_ENCAP_TYPE_GRE;
+
+    tunnel_info.out_if = p4_get_intf_handle_from_ip(&(tunnel_info.u.ip_encap.src_ip));
+    tunnel_info.flags.core_intf = true;
+    tunnel_info.flags.flood_enabled = true;
+
+    print_gre_tunnel_info(&tunnel_info);
+    bundle->if_handle = switch_api_tunnel_interface_create(DEFAULT_P4_DEVICE,
+                                                           SWITCH_API_DIRECTION_BOTH, &tunnel_info);
+    if (P4_HANDLE_IS_VALID(bundle->if_handle)) {
+        VLOG_DBG("Created GRE Tunnel interface, handle = %lx", bundle->if_handle);
+        netdev_set_tunnel_iface_handle(netdev, bundle->if_handle);
+        tnl_node = tnl_lookup_netdev(netdev);
+        tnl_node->tunnel_handle = bundle->if_handle;
+        return bundle->if_handle;
+    }
+
+    return SWITCH_API_INVALID_HANDLE;
+}
+
+/*
+ *  Input  : Tunnel neighbor information( ops_neighbor)
+ *           and tunnel information( bundle, netdev)
+ *  Output : nexthop entry, neighbor table entries.
+ *  This function creates the nexthop entry for the tunnel using
+ *  the tunnel handle( interface handle), and creates neighbor entries
+ *  using the nexthop handle and the tunnel handle.
+ *
+ *  The P4 program programs two different tables one for the inner IP and outer IP
+ *  So two tables are needed to create two handles to program these two tables.
+ *  Neighbor 1 - programs that it is L3 Tunnel Neighbor in the case of GRE.
+ *  Neighbor 2 - programs the rewrite indices.
+ *
+ *  Once the neighbor table entries are added, the function updates the hashtable.
+ *
+ */
+int
+p4_vport_gre_tunnel_add_neighbor(struct ofbundle *bundle, struct netdev *netdev,
+                              struct ops_neighbor *nbor)
+{
+    struct sim_provider_node    *ofproto = bundle->ofproto;
+    switch_handle_t             tunnel_handle = netdev_get_tunnel_iface_handle(netdev);
+    switch_handle_t             neigh1_handle = 0;
+    switch_handle_t             neigh2_handle = 0;
+    switch_api_neighbor_t       neighbor1;
+    switch_api_neighbor_t       neighbor2;
+    switch_handle_t             nhop_handle = 0;
+    struct ether_addr *         mac_addr = NULL;
+    switch_nhop_key_t           nexthop_key;
+    switch_status_t             status;
+    tunnel_node                 *tnl_node = NULL;
+
+    memset(&nexthop_key, 0x0, sizeof(switch_nhop_key_t));
+    nexthop_key.intf_handle = tunnel_handle;
+    nexthop_key.ip_addr_valid = false;
+    nhop_handle = switch_api_nhop_create(DEFAULT_P4_DEVICE, &nexthop_key);
+    VLOG_DBG("nexthop handle %lx", nbor->nhop_handle);
+
+    netdev_set_nexthop_handle(netdev, nhop_handle);
+    memset(&neighbor1, 0x0, sizeof(switch_api_neighbor_t));
+    neighbor1.neigh_type = SWITCH_API_NEIGHBOR_IPV4_TUNNEL;
+    neighbor1.rw_type = SWITCH_API_NEIGHBOR_RW_TYPE_L3;
+    neighbor1.vrf_handle = ofproto->vrf_handle;
+    neighbor1.interface = tunnel_handle;
+    neighbor1.nhop_handle = nhop_handle;
+    neighbor1.ip_addr.type = SWITCH_API_IP_ADDR_V4;
+    neighbor1.ip_addr.ip.v4addr = nbor->ip;
+    neighbor1.ip_addr.prefix_len = P4_SWITCH_API_DEFAULT_IP_PREFIX_LEN;
+
+    VLOG_DBG("Adding neighbor IP: %lx, MAC:%s", nbor->ip, nbor->mac);
+    mac_addr = ether_aton(CONST_CAST(char *, nbor->mac));
+    memcpy(&(neighbor1.mac_addr.mac_addr), mac_addr, ETH_ALEN);
+    neigh1_handle = switch_api_neighbor_entry_add(DEFAULT_P4_DEVICE, &neighbor1);
+    VLOG_DBG("neigh 1 handle %lx", neigh1_handle);
+
+    memset(&neighbor2, 0x0, sizeof(switch_api_neighbor_t));
+    neighbor2.neigh_type = SWITCH_API_NEIGHBOR_NONE;
+    neighbor2.rw_type = SWITCH_API_NEIGHBOR_RW_TYPE_L3;
+    neighbor2.vrf_handle = ofproto->vrf_handle;
+    neighbor2.interface = tunnel_handle;
+    neighbor2.nhop_handle = 0x0;
+    neighbor2.ip_addr.type = SWITCH_API_IP_ADDR_V4;
+    neighbor2.ip_addr.ip.v4addr = nbor->ip;
+    neighbor2.ip_addr.prefix_len = P4_SWITCH_API_DEFAULT_IP_PREFIX_LEN;
+    mac_addr = ether_aton(CONST_CAST(char *, nbor->mac));
+    memcpy(&neighbor2.mac_addr.mac_addr, mac_addr, ETH_ALEN);
+    neigh2_handle = switch_api_neighbor_entry_add(DEFAULT_P4_DEVICE, &neighbor2);
+    VLOG_DBG("neigh 2 handle %lx", neigh2_handle);
+
+    tnl_node = tnl_lookup_netdev(netdev);
+    tnl_node->nhop_handle = nhop_handle;
+    tnl_node->neighbor1_handle = neigh1_handle;
+    tnl_node->neighbor2_handle = neigh2_handle;
+
+    return 0;
+}
+
+
+/*
+ *  Input = GRE Tunnel information (netdev).
+ *  Output = Deletes the gre tunnel interface.
+ *  This function receives the tunnel information of the tunnel to be deleted,
+ *  looks up the hash table with the corresponding information,
+ *  retrieves the neighbor1 handle(neighbor1_handle),
+ *  neighbor2 handle(neighbor1_handle), nexthop handle (nhop_handle)
+ *  interface handle (tunnel_handle) and removes the corresponding entries
+ *  from the ASIC and removes the same data from the hash table.
+ */
+switch_handle_t
+p4_ops_vport_delete_gre_tunnel(struct netdev *netdev) {
+
+    switch_status_t   status;
+    tunnel_node *tnl_node = NULL;
+
+    tnl_node = tnl_lookup_netdev(netdev);
+    if(tnl_node) {
+        /* Deleting neighbor 1 entry */
+        status =  switch_api_neighbor_entry_remove(DEFAULT_P4_DEVICE,
+                                                   tnl_node->neighbor1_handle);
+        if (status == SWITCH_STATUS_SUCCESS) {
+            VLOG_DBG("%s: Successfully deleted GRE tunnel neighbor1 entry", __func__);
+        } else {
+            VLOG_ERR("%s: GRE Tunnel neighbor1 delete failed - %d", __func__, status);
+        }
+        /* Deleting neighbor 2 entry */
+        status =  switch_api_neighbor_entry_remove(DEFAULT_P4_DEVICE,
+                                                   tnl_node->neighbor2_handle);
+        if (status == SWITCH_STATUS_SUCCESS)  {
+            VLOG_DBG("%s: Successfully deleted GRE tunnel neighbor2 entry", __func__);
+        } else {
+            VLOG_ERR("%s: GRE Tunnel neighbor2 delete failed - %d", __func__, status);
+        }
+        /* Deleting nexthop entry */
+        status = switch_api_nhop_delete(DEFAULT_P4_DEVICE,
+                                        tnl_node->nhop_handle);
+        if (status == SWITCH_STATUS_SUCCESS) {
+            VLOG_DBG("%s: Successfully deleted GRE tunnel nexthop entry", __func__);
+        } else {
+            VLOG_ERR("%s: GRE Tunnel nexthop entry delete 0x%x failed - %d", __func__,
+                     tnl_node->nhop_handle, status);
+        }
+        /* Deleting tunnel interface*/
+        status = switch_api_tunnel_interface_delete(DEFAULT_P4_DEVICE, tnl_node->tunnel_handle);
+        if (status == SWITCH_STATUS_SUCCESS) {
+            VLOG_DBG("%s: Successfully deleted tunnel interface", __func__);
+        } else  {
+            VLOG_ERR("%s: GRE tunnel interface delete 0x%x failed - %d", __func__,
+                     tnl_node->nhop_handle, status);
+        }
+        tnl_remove(netdev);
+    }
+    return 0;
+}
+
 static void
 print_tunnel_info(switch_tunnel_info_t *tunnel_info)
 {
@@ -129,6 +360,7 @@ print_tunnel_info(switch_tunnel_info_t *tunnel_info)
     VLOG_DBG("Core Intf = %d", tunnel_info->flags.core_intf);
     VLOG_DBG("Flood Enabled = %d", tunnel_info->flags.flood_enabled);
 }
+
 
 switch_handle_t
 p4_vport_create_tunnel(struct ofbundle *bundle, struct netdev *netdev)
