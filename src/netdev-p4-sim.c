@@ -1390,7 +1390,7 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args)
         return 0;
     }
     VLOG_DBG("%s: netdev name = %s type = %s", __func__, name, type);
-    has_csum = strstr(type, "gre") || strstr(type, "vxlan");
+    has_csum = strstr(type, "gre_ipv4") || strstr(type, "vxlan");
     memset(&tnl_cfg, 0, sizeof(struct netdev_tunnel_config));
 
     /* Add a default destination port for tunnel ports if none specified. */
@@ -1466,11 +1466,13 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args)
                                &tnl_cfg.out_key_present,
                                &tnl_cfg.out_key_flow);
 
-    if(tnl_cfg.in_key_present)
-        VLOG_DBG("set_tunnel_config key %lx",
+    if (!strcmp(type, "vxlan")) {  // No VNI required for GRE Tunnel
+        if(tnl_cfg.in_key_present)
+            VLOG_DBG("set_tunnel_config key %lx",
                 (unsigned long int)ntohll(tnl_cfg.in_key));
-    else {
-        vni_set = false;
+        else {
+            vni_set = false;
+        }
     }
 
     ovs_mutex_lock(&dev->mutex);
@@ -1673,15 +1675,20 @@ static const struct netdev_class sim_subinterface_class = {
     NULL,                       /* rxq_drain */
 };
 
-static const struct netdev_class vport_classes =
-    TUNNEL_CLASS("vxlan", NULL,NULL,NULL);
+static const struct netdev_class vport_classes[] = {
+    TUNNEL_CLASS("vxlan", NULL,NULL,NULL),
+    TUNNEL_CLASS("gre_ipv4", NULL, NULL, NULL),
+};
 
 void
 netdev_sim_register(void)
 {
+    int i = 0;
     netdev_register_provider(&sim_class);
     netdev_register_provider(&sim_internal_class);
     netdev_register_provider(&sim_loopback_class);
     netdev_register_provider(&sim_subinterface_class);
-    netdev_register_provider(&vport_classes);
+    for(i=0; i< ARRAY_SIZE(vport_classes); i++) {
+        netdev_register_provider(&vport_classes[i]);
+    }
 }

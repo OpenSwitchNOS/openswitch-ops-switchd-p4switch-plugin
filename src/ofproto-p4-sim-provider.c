@@ -144,7 +144,8 @@ port_open_type(const char *datapath_type OVS_UNUSED, const char *port_type)
 {
     if (port_type && ((strcmp(port_type, OVSREC_INTERFACE_TYPE_INTERNAL) == 0) ||
             (strcmp(port_type, OVSREC_INTERFACE_TYPE_VLANSUBINT) == 0) ||
-            (strcmp(port_type, OVSREC_INTERFACE_TYPE_VXLAN) == 0))) {
+            (strcmp(port_type, OVSREC_INTERFACE_TYPE_VXLAN) == 0) ||
+            (strcmp(port_type, OVSREC_INTERFACE_TYPE_GRE_IPV4) == 0))) {
         return port_type;
     }
     return "system";
@@ -649,17 +650,26 @@ disable_port_in_iptables(const char *port_name)
 }
 
 static int
-p4_vport_create(struct ofbundle *bundle, struct netdev *netdev)
+p4_vport_create(struct ofbundle *bundle, struct netdev *netdev, const char *type)
 {
     struct ops_neighbor*    nbor = NULL;
     switch_handle_t         tunnel_handle = 0;
     nbor = get_nexthop(netdev);
-    if(nbor != NULL) {
-        tunnel_handle = p4_vport_create_tunnel(bundle, netdev);
-        if(tunnel_handle != SWITCH_API_INVALID_HANDLE){
-            p4_vport_tunnel_add_neighbor(bundle, netdev, nbor);
-        } else {
-            VLOG_ERR("Tunnel Interface creation failed");
+    if (nbor != NULL) {
+        if (!strcmp(type, OVSREC_INTERFACE_TYPE_VXLAN)) {
+            tunnel_handle = p4_vport_create_tunnel(bundle, netdev);
+            if (tunnel_handle != SWITCH_API_INVALID_HANDLE){
+                p4_vport_tunnel_add_neighbor(bundle, netdev, nbor);
+            } else {
+                VLOG_ERR("VXLAN Tunnel Interface creation failed");
+            }
+        } else if (!strcmp(type, OVSREC_INTERFACE_TYPE_GRE_IPV4)) {
+            tunnel_handle = p4_vport_create_gre_tunnel(bundle, netdev);
+            if(tunnel_handle != SWITCH_API_INVALID_HANDLE){
+                p4_vport_gre_tunnel_add_neighbor(bundle, netdev, nbor);
+            } else {
+                VLOG_ERR("GRE Tunnel Interface creation failed");
+            }
         }
     } else {
         VLOG_DBG("Tunnel Nexthop not available");
@@ -697,9 +707,14 @@ static void
 bundle_del_port(struct sim_provider_ofport *port)
 {
     struct ofbundle *bundle = port->bundle;
+    const char *type = netdev_get_type(port->up.netdev);
 
     list_remove(&port->bundle_node);
     port->bundle = NULL;
+
+    if (strcmp(type, OVSREC_INTERFACE_TYPE_GRE_IPV4) == 0) {
+        p4_ops_vport_delete_gre_tunnel(port->up.netdev);
+    }
 
     if (bundle && bundle->is_lag) {
         p4_lag_port_update(bundle->port_lag_handle, port, false/*add*/);
@@ -725,12 +740,18 @@ bundle_add_port(struct ofbundle *bundle, ofp_port_t ofp_port)
         port->bundle = bundle;
         port->is_tunnel = false;
         type = netdev_get_type(port->up.netdev);
-        if(!strcmp(type, OVSREC_INTERFACE_TYPE_VXLAN))
+        if (!strcmp(type, OVSREC_INTERFACE_TYPE_VXLAN))
         {
             port->is_tunnel = true;
             VLOG_DBG("%s, bundle_add_port vxlan bundle name %s, ofp_port %d",
                                         __func__, bundle->name, (int)ofp_port);
-            p4_vport_create(bundle, port->up.netdev);
+            p4_vport_create(bundle, port->up.netdev, type);
+        } else  if (!strcmp(type, OVSREC_INTERFACE_TYPE_GRE_IPV4))
+        {
+            port->is_tunnel = true;
+            VLOG_DBG("%s, bundle_add_port GRE bundle name %s, ofp_port %d",
+                                        __func__, bundle->name, (int)ofp_port);
+            p4_vport_create(bundle, port->up.netdev, type);
         }
 
         list_push_back(&bundle->ports, &port->bundle_node);
@@ -1309,8 +1330,9 @@ found:     ;
             // create the net filters, it implicitly creates vlan if not already
             // created
             p4_vlan_if_bundle_l3_filters_update(ofproto, bundle, true/*create*/);
-        } else if (strcmp(type, OVSREC_INTERFACE_TYPE_VXLAN) == 0) {
-            /* This is a VxLAN interface */
+        } else if (strcmp(type, OVSREC_INTERFACE_TYPE_VXLAN) == 0 ||
+                   strcmp(type, OVSREC_INTERFACE_TYPE_GRE_IPV4) == 0) {
+            /* This is a Tunnel interface */
             new_port_type = SWITCH_API_INTERFACE_TUNNEL;
 
         } else {

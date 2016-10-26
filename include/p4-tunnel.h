@@ -53,6 +53,10 @@ enum tnl_state {
 typedef struct tunnel_node_ {
     struct hmap_node hmap_t_node;
     uint32_t remote_ip;
+    switch_handle_t tunnel_handle;
+    switch_handle_t nhop_handle;
+    switch_handle_t neighbor1_handle;
+    switch_handle_t neighbor2_handle;
     struct netdev *netdev;
 }tunnel_node;
 
