@@ -50,11 +50,23 @@ enum tnl_state {
                           * and vport is created */
 };
 
+/*
+ *  The P4 program programs two different tables one for the inner MAC and outer MAC
+ *  for L2 VXLAN routing, and inner IP and outer IP for GRE.
+ *  So two tables are needed to create two handles to program these two tables.
+ *  Neighbor 1 - programs that it is L3 Tunnel Neighbor in case of GRE.
+ *  Neighbor 2 - programs the rewrite indices.
+ *
+ */
 typedef struct tunnel_node_ {
     struct hmap_node hmap_t_node;
-    uint32_t remote_ip;
+    uint32_t remote_ip;            /* Tunnel destination IP */
+    switch_handle_t tunnel_handle; /* Tunnel interface handle */
+    switch_handle_t nhop_handle;  /* Nexthop handle of the tunnel nexthop entry */
+    switch_handle_t neighbor1_handle; /* Neighbor 1 table entry handle */
+    switch_handle_t neighbor2_handle; /* Neighbor 2 table entry handle */
     struct netdev *netdev;
-}tunnel_node;
+} tunnel_node;
 
 tunnel_node * tnl_insert(struct netdev *dev, uint32_t ip_addr);
 void tnl_remove(struct netdev *netdev);
