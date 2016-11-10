@@ -52,7 +52,7 @@ tnl_insert(struct netdev *dev, uint32_t ip_addr)
     return node;
 }
 
-static tunnel_node *
+tunnel_node *
 tnl_lookup_ip(uint32_t ip)
 {
     tunnel_node *node;
@@ -66,7 +66,7 @@ tnl_lookup_ip(uint32_t ip)
 }
 
 /* caller has to validate *dev */
-static tunnel_node *
+tunnel_node *
 tnl_lookup_netdev(struct netdev *netdev)
 {
 	uint32_t ip = 0;
@@ -81,6 +81,17 @@ tnl_lookup_netdev(struct netdev *netdev)
     return tnl_lookup_ip(ip);
 }
 
+tunnel_node *
+tnl_lookup_dev_name(char *name)
+{
+    tunnel_node *node;
+    HMAP_FOR_EACH(node, hmap_t_node, &tunnel_hmap) {
+        if (strcmp(node->netdev->name,name) == 0) {
+            return node;
+        }
+    }
+    return NULL;
+}
 /* caller has to validate *netdev */
 void
 tnl_remove(struct netdev *netdev)
@@ -112,7 +123,6 @@ get_vni(struct netdev *netdev)
     }
     return -1;
 }
-
 /*
  *  Input = GRE Tunnel configuration used to create the tunnel.
  *  Output = Displays the Tunnel configuration.
@@ -195,15 +205,18 @@ p4_vport_create_gre_tunnel(struct ofbundle *bundle, struct netdev *netdev)
     print_gre_tunnel_info(&tunnel_info);
     bundle->if_handle = switch_api_tunnel_interface_create(DEFAULT_P4_DEVICE,
                                                            SWITCH_API_DIRECTION_BOTH, &tunnel_info);
-    if (P4_HANDLE_IS_VALID(bundle->if_handle)) {
-        VLOG_DBG("Created GRE Tunnel interface, handle = %lx", bundle->if_handle);
+
+    if (P4_HANDLE_IS_VALID(bundle->if_handle) && bundle->if_handle != SWITCH_STATUS_NO_MEMORY) {
+        VLOG_DBG("%s: Created GRE Tunnel interface, handle = %lx", __func__, bundle->if_handle);
         netdev_set_tunnel_iface_handle(netdev, bundle->if_handle);
-        tnl_node = tnl_lookup_netdev(netdev);
+        tnl_node = tnl_insert(netdev, encap_info.dst_ip.ip.v4addr);
+        tnl_node->source_ip =  encap_info.src_ip.ip.v4addr;
+        tnl_node->ttl = encap_info.ttl;
         tnl_node->tunnel_handle = bundle->if_handle;
         return bundle->if_handle;
     }
 
-    return SWITCH_API_INVALID_HANDLE;
+    return 0;
 }
 
 /*
@@ -286,7 +299,10 @@ p4_vport_gre_tunnel_add_neighbor(struct ofbundle *bundle, struct netdev *netdev,
 
 /*
  *  Input = GRE Tunnel information (netdev).
- *  Output = Deletes the gre tunnel interface.
+ *  Output = Returns SWITCH_STATUS_SUCCESS if the gre tunnel interface and
+ *           other dependent configuaration is removed.
+ *           Returns SWITCH_STATUS_FAILURE otherwise.
+ *
  *  This function receives the tunnel information of the tunnel to be deleted,
  *  looks up the hash table with the corresponding information,
  *  retrieves the neighbor1 handle(neighbor1_handle),
@@ -294,50 +310,67 @@ p4_vport_gre_tunnel_add_neighbor(struct ofbundle *bundle, struct netdev *netdev,
  *  interface handle (tunnel_handle) and removes the corresponding entries
  *  from the ASIC and removes the same data from the hash table.
  */
-switch_handle_t
-p4_ops_vport_delete_gre_tunnel(struct netdev *netdev) {
+switch_status_t
+p4_ops_vport_delete_gre_tunnel(struct ofbundle *bundle, struct netdev *netdev) {
 
     switch_status_t   status;
     tunnel_node *tnl_node = NULL;
+    bool invalid_entry = false;
 
-    tnl_node = tnl_lookup_netdev(netdev);
-    if(tnl_node) {
+    tnl_node = tnl_lookup_dev_name(netdev->name);
+    if(tnl_node){
         /* Deleting neighbor 1 entry */
-        status =  switch_api_neighbor_entry_remove(DEFAULT_P4_DEVICE,
-                                                   tnl_node->neighbor1_handle);
-        if (status == SWITCH_STATUS_SUCCESS) {
-            VLOG_DBG("%s: Successfully deleted GRE tunnel neighbor1 entry", __func__);
-        } else {
-            VLOG_ERR("%s: GRE Tunnel neighbor1 delete failed - %d", __func__, status);
+        if (tnl_node->neighbor1_handle) {
+            status =  switch_api_neighbor_entry_remove(DEFAULT_P4_DEVICE,
+                                                       tnl_node->neighbor1_handle);
+            if (status == SWITCH_STATUS_SUCCESS) {
+                VLOG_DBG("%s: Successfully deleted GRE tunnel neighbor1 entry", __func__);
+            } else {
+                VLOG_ERR("%s: GRE Tunnel neighbor1 delete failed - %d", __func__, status);
+                invalid_entry = true;
+            }
         }
         /* Deleting neighbor 2 entry */
-        status =  switch_api_neighbor_entry_remove(DEFAULT_P4_DEVICE,
-                                                   tnl_node->neighbor2_handle);
-        if (status == SWITCH_STATUS_SUCCESS)  {
-            VLOG_DBG("%s: Successfully deleted GRE tunnel neighbor2 entry", __func__);
-        } else {
-            VLOG_ERR("%s: GRE Tunnel neighbor2 delete failed - %d", __func__, status);
+        if (tnl_node->neighbor2_handle) {
+            status =  switch_api_neighbor_entry_remove(DEFAULT_P4_DEVICE,
+                                                       tnl_node->neighbor2_handle);
+            if (status == SWITCH_STATUS_SUCCESS)  {
+                VLOG_DBG("%s: Successfully deleted GRE tunnel neighbor2 entry", __func__);
+            } else {
+                VLOG_ERR("%s: GRE Tunnel neighbor2 delete failed - %d", __func__, status);
+                invalid_entry = true;
+            }
         }
         /* Deleting nexthop entry */
-        status = switch_api_nhop_delete(DEFAULT_P4_DEVICE,
+        if (tnl_node->nhop_handle) {
+            status = switch_api_nhop_delete(DEFAULT_P4_DEVICE,
                                         tnl_node->nhop_handle);
-        if (status == SWITCH_STATUS_SUCCESS) {
-            VLOG_DBG("%s: Successfully deleted GRE tunnel nexthop entry", __func__);
-        } else {
-            VLOG_ERR("%s: GRE Tunnel nexthop entry delete 0x%x failed - %d", __func__,
+            if (status == SWITCH_STATUS_SUCCESS) {
+                VLOG_DBG("%s: Successfully deleted GRE tunnel nexthop entry", __func__);
+            } else {
+                VLOG_ERR("%s: GRE Tunnel nexthop entry delete 0x%x failed - %d", __func__,
                      tnl_node->nhop_handle, status);
+                invalid_entry = true;
+            }
         }
         /* Deleting tunnel interface*/
-        status = switch_api_tunnel_interface_delete(DEFAULT_P4_DEVICE, tnl_node->tunnel_handle);
-        if (status == SWITCH_STATUS_SUCCESS) {
-            VLOG_DBG("%s: Successfully deleted tunnel interface", __func__);
-        } else  {
-            VLOG_ERR("%s: GRE tunnel interface delete 0x%x failed - %d", __func__,
-                     tnl_node->nhop_handle, status);
+        if (tnl_node->tunnel_handle) {
+            status = switch_api_tunnel_interface_delete(DEFAULT_P4_DEVICE, tnl_node->tunnel_handle);
+            if (status == SWITCH_STATUS_SUCCESS) {
+                VLOG_DBG("%s: Successfully deleted tunnel interface", __func__);
+                bundle->if_handle = SWITCH_API_INVALID_HANDLE;
+            } else  {
+                VLOG_ERR("%s: GRE tunnel interface delete 0x%x failed - %d", __func__,
+                         tnl_node->tunnel_handle, status);
+                invalid_entry = true;
+            }
         }
         tnl_remove(netdev);
+        if (!invalid_entry) {
+            return SWITCH_STATUS_SUCCESS;
+        }
     }
-    return 0;
+    return SWITCH_STATUS_FAILURE;
 }
 
 static void
