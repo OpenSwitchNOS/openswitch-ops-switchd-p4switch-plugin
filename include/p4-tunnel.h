@@ -61,6 +61,8 @@ enum tnl_state {
 typedef struct tunnel_node_ {
     struct hmap_node hmap_t_node;
     uint32_t remote_ip;            /* Tunnel destination IP */
+    uint32_t source_ip;            /* Source IP */
+    unsigned char ttl;
     switch_handle_t tunnel_handle; /* Tunnel interface handle */
     switch_handle_t nhop_handle;  /* Nexthop handle of the tunnel nexthop entry */
     switch_handle_t neighbor1_handle; /* Neighbor 1 table entry handle */
@@ -72,6 +74,5 @@ tunnel_node * tnl_insert(struct netdev *dev, uint32_t ip_addr);
 void tnl_remove(struct netdev *netdev);
 void p4_vport_update_host_chg(int event, char *ip_addr, int l3_egress_id);
 void p4_vport_update_route_chg(int event, char* route_prefix);
-
 
 #endif /* P4_TUNNEL_H */

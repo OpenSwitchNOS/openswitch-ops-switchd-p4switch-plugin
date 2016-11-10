@@ -1385,11 +1385,8 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args)
     uint32_t ipv4;
 
     if (dev->state >= TNL_INIT) {
-        /* Don't support changes for now */
-        VLOG_WARN("%s: Tunnel is already initialised, changes not supported", __func__);
-        return 0;
+        VLOG_DBG("%s: Tunnel is already initialised", __func__);
     }
-    VLOG_DBG("%s: netdev name = %s type = %s", __func__, name, type);
     has_csum = strstr(type, "gre_ipv4") || strstr(type, "vxlan");
     memset(&tnl_cfg, 0, sizeof(struct netdev_tunnel_config));
 
@@ -1482,10 +1479,6 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args)
     }
     ovs_mutex_unlock(&dev->mutex);
     if (remote_set && local_set && vni_set) {
-        ipv4 = ntohl(in6_addr_get_mapped_ipv4(&tnl_cfg.ipv6_dst));
-        if (ipv4) {
-            tnl_insert(dev_, ipv4);
-        }
         dev->state = TNL_INIT;
     }
     else {
