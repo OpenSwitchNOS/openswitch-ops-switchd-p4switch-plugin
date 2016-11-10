@@ -35,6 +35,7 @@
 #include "ofproto-p4-sim-provider.h"
 #include "vswitch-idl.h"
 #include "types.h"
+#include "p4-tunnel.h"
 
 #include "netdev-p4-sim.h"
 #include <netinet/ether.h>
@@ -654,6 +655,7 @@ p4_vport_create(struct ofbundle *bundle, struct netdev *netdev, const char *type
 {
     struct ops_neighbor*    nbor = NULL;
     switch_handle_t         tunnel_handle = 0;
+    int ret = 0;
     if (netdev != NULL) {
         nbor = get_nexthop(netdev);
     }
@@ -667,7 +669,7 @@ p4_vport_create(struct ofbundle *bundle, struct netdev *netdev, const char *type
             }
         } else if (!strncmp(type, OVSREC_INTERFACE_TYPE_GRE_IPV4, 8)) {
             tunnel_handle = p4_vport_create_gre_tunnel(bundle, netdev);
-            if(tunnel_handle != SWITCH_API_INVALID_HANDLE){
+            if(tunnel_handle){
                 p4_vport_gre_tunnel_add_neighbor(bundle, netdev, nbor);
             } else {
                 VLOG_ERR("%s, GRE Tunnel Interface creation failed", __func__);
@@ -677,6 +679,69 @@ p4_vport_create(struct ofbundle *bundle, struct netdev *netdev, const char *type
         VLOG_ERR("%s, Tunnel Nexthop not available", __func__);
     }
 }
+
+/*
+ *  Input = GRE tunnel configuration information ( bundle, netdev)
+ *  Output = Returns 0 if tunnel exists and the existing tunnel configuration
+ *           has changed or there is no change in the existing tunnel
+ *           configuartion.
+ *           Return 1 if there is the tunnel doesn't exist.
+ *
+ *  This function checks for the change in tunnel configuration.
+ *  If tunnel configuration has changed, the existing tunnel is deleted and new
+ *  tunnel is created with the new configuration.
+ */
+static int
+p4_gre_tunnel_check_config_change(struct ofbundle *bundle, struct netdev *netdev)
+{
+    tunnel_node                       *tnl_node = NULL;
+    const struct netdev_tunnel_config *tnl_cfg = NULL;
+    const char                        *type  =  netdev_get_type(netdev);
+    ovs_be32                          src_ip;
+    ovs_be32                          dest_ip;
+    switch_status_t                   status = SWITCH_STATUS_SUCCESS;
+
+    tnl_cfg = netdev_get_tunnel_config(netdev);
+    if (tnl_cfg) {
+        dest_ip = ntohl(in6_addr_get_mapped_ipv4(&(tnl_cfg->ipv6_dst)));
+        if (dest_ip) {
+            VLOG_DBG("%s: netdev tunnel destination ip = %lx", __func__, dest_ip);
+        }
+        src_ip = ntohl(in6_addr_get_mapped_ipv4(&(tnl_cfg->ipv6_src)));
+        if (src_ip) {
+            VLOG_DBG("%s: netdev tunnel source ip = %lx", __func__, src_ip);
+        }
+        if (tnl_cfg->ttl) {
+            VLOG_DBG("%s: netdev tunnel ttl = %d", __func__, tnl_cfg->ttl);
+        }
+        if (type) {
+            VLOG_DBG("%s: netdev tunnel type = %s", __func__, type);
+        }
+    }
+    tnl_node = tnl_lookup_dev_name(netdev->name);
+    if (tnl_node) {
+        if (tnl_node->remote_ip != dest_ip ||
+            tnl_node->source_ip != src_ip ||
+            tnl_node->ttl != tnl_cfg->ttl) {
+            VLOG_DBG("%s: Change in Tunnel configuration detected."
+                     "Deleting the existing tunnel", __func__);
+           status = p4_ops_vport_delete_gre_tunnel(bundle, netdev);
+           if (status == SWITCH_STATUS_SUCCESS) {
+                VLOG_DBG("%s: Existing GRE tunnel deleted."
+                         " Creating new tunnel", __func__);
+                p4_vport_create(bundle, netdev, type);
+           } else {
+                VLOG_ERR("%s: Failed to delete existing GRE Tunnel", __func__);
+           }
+        } else {
+            VLOG_DBG("%s: No change in tunnel configuration", __func__);
+        }
+        return 0;
+    }
+    VLOG_INFO("%s: No existing GRE tunnel configuration found", __func__);
+    return 1 ;
+}
+
 
 static void
 p4_lag_port_update (switch_handle_t lag_handle,
@@ -718,7 +783,7 @@ bundle_del_port(struct sim_provider_ofport *port)
     port->bundle = NULL;
 
     if (strncmp(type, OVSREC_INTERFACE_TYPE_GRE_IPV4, 8) == 0) {
-        p4_ops_vport_delete_gre_tunnel(port->up.netdev);
+        p4_ops_vport_delete_gre_tunnel(bundle, port->up.netdev);
     }
 
     if (bundle && bundle->is_lag) {
@@ -731,22 +796,20 @@ bundle_add_port(struct ofbundle *bundle, ofp_port_t ofp_port)
 {
     struct sim_provider_ofport *port;
     const char *type;
-
+    int ret;
     port = get_ofp_port(bundle->ofproto, ofp_port);
     if (!port) {
         return false;
     }
-
     if (port->bundle != bundle) {
         if (port->bundle) {
             bundle_remove(&port->up);
         }
-
         port->bundle = bundle;
         port->is_tunnel = false;
         type = netdev_get_type(port->up.netdev);
-        if (!strncmp(type, OVSREC_INTERFACE_TYPE_VXLAN, 5)
-            || !strncmp(type, OVSREC_INTERFACE_TYPE_GRE_IPV4, 8)) {
+        if (!strncmp(type, OVSREC_INTERFACE_TYPE_VXLAN, 5) ||
+            !strncmp(type, OVSREC_INTERFACE_TYPE_GRE_IPV4, 8)) {
             port->is_tunnel = true;
             VLOG_DBG("%s, bundle_add_port %s bundle name %s, ofp_port %d",
                                         __func__, type, bundle->name, (int)ofp_port);
@@ -757,6 +820,19 @@ bundle_add_port(struct ofbundle *bundle, ofp_port_t ofp_port)
         /* if lag is already create in h/w, add member port to it */
         if (bundle->is_lag) {
             p4_lag_port_update(bundle->port_lag_handle, port, true/*add*/);
+        }
+        return true;
+
+    } else if (port->is_tunnel) {
+        /* If port is of type tunnel, check for changes in the tunnel
+         * configuration and proceed.
+         * If port is not NULL and no tunnel configuration exists,
+         * create a new tunnel interface.
+         */
+        ret = p4_gre_tunnel_check_config_change(bundle, port->up.netdev);
+        if (ret) {
+            type = netdev_get_type(port->up.netdev);
+            p4_vport_create(bundle, port->up.netdev, type);
         }
     }
 
