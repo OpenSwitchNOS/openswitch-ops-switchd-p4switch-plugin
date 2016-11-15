@@ -56,8 +56,21 @@ enum tnl_state {
  *  So two tables are needed to create two handles to program these two tables.
  *  Neighbor 1 - programs that it is L3 Tunnel Neighbor in case of GRE.
  *  Neighbor 2 - programs the rewrite indices.
- *
+ *  gre_tunnel_node - GRE Tunnel specific information.
+ *  tunnel_node - VXLAN Tunnel specific information.
  */
+typedef struct gre_tunnel_node_ {
+    struct hmap_node hmap_t_node;
+    uint32_t remote_ip;              /* Tunnel destination IP */
+    uint32_t source_ip;              /* Tunnel Source IP */
+    unsigned char ttl;               /* Tunnel TTL */
+    switch_handle_t tunnel_handle;   /* Tunnel interface handle */
+    switch_handle_t nhop_handle;     /* Nexthop handle of the tunnel nexthop entry */
+    switch_handle_t neighbor1_handle;/* Neighbor 1 table entry handle */
+    switch_handle_t neighbor2_handle;/* Neighbor 2 table entry handle */
+    struct netdev *netdev;
+} gre_tunnel_node;
+
 typedef struct tunnel_node_ {
     struct hmap_node hmap_t_node;
     uint32_t remote_ip;            /* Tunnel destination IP */
@@ -68,10 +81,8 @@ typedef struct tunnel_node_ {
     struct netdev *netdev;
 } tunnel_node;
 
-tunnel_node * tnl_insert(struct netdev *dev, uint32_t ip_addr);
+tunnel_node *tnl_insert(struct netdev *dev, uint32_t ip_addr);
 void tnl_remove(struct netdev *netdev);
 void p4_vport_update_host_chg(int event, char *ip_addr, int l3_egress_id);
 void p4_vport_update_route_chg(int event, char* route_prefix);
-
-
 #endif /* P4_TUNNEL_H */
