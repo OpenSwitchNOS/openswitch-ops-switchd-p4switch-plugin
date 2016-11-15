@@ -1305,6 +1305,7 @@ parse_key(const struct smap *args, const char *name,
         return htonll(strtoull(s, NULL, 0));
     }
 }
+
 static int
 get_tunnel_config(const struct netdev *dev, struct smap *args)
 {
@@ -1384,11 +1385,6 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args)
     struct smap_node *node;
     uint32_t ipv4;
 
-    if (dev->state >= TNL_INIT) {
-        /* Don't support changes for now */
-        VLOG_WARN("%s: Tunnel is already initialised, changes not supported", __func__);
-        return 0;
-    }
     VLOG_DBG("%s: netdev name = %s type = %s", __func__, name, type);
     has_csum = strstr(type, "gre_ipv4") || strstr(type, "vxlan");
     memset(&tnl_cfg, 0, sizeof(struct netdev_tunnel_config));
@@ -1401,6 +1397,7 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args)
     needs_dst_port = netdev_vport_needs_dst_port(dev_);
     tnl_cfg.dont_fragment = true;
     SMAP_FOR_EACH (node, args) {
+        VLOG_INFO("KEY : %s", node->key);
         if (!strcmp(node->key, "remote_ip")) {
             int err;
             err = parse_tunnel_ip(node->value, false, &tnl_cfg.ip_dst_flow,
@@ -1437,7 +1434,6 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args)
         } else if (!strcmp(node->key, "vni_list") ||
                    !strcmp(node->key, "in_key") ||
                    !strcmp(node->key, "out_key")) {
-            /* Handled separately below. */
         } else {
             VLOG_WARN("%s: unknown %s argument '%s'", name, type, node->key);
         }
@@ -1482,10 +1478,6 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args)
     }
     ovs_mutex_unlock(&dev->mutex);
     if (remote_set && local_set && vni_set) {
-        ipv4 = ntohl(in6_addr_get_mapped_ipv4(&tnl_cfg.ipv6_dst));
-        if (ipv4) {
-            tnl_insert(dev_, ipv4);
-        }
         dev->state = TNL_INIT;
     }
     else {
